@@ -137,6 +137,8 @@ import androidx.viewpager.widget.ViewPager;
 import com.google.zxing.common.detector.MathUtils;
 
 import org.telegram.PhoneFormat.PhoneFormat;
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.telegram.messenger.AccountInstance;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
@@ -381,6 +383,37 @@ public class ChatActivity extends BaseFragment implements
     private final static boolean DISABLE_PROGRESS_VIEW = true;
     private final static int SKELETON_DISAPPEAR_MS = 200;
     public static final int ACTION_BAR_BLUR_ALPHA = 178;
+    public static final long LOCAL_DEMO_USER_ID = 9_900_001L;
+    private static final String LOCAL_DEMO_PREFS = "native_local_video_demo";
+    private static final String LOCAL_DEMO_MESSAGES = "messages";
+    private static final long LOCAL_BATCH_FINAL_HANDOFF_MS = 220L;
+
+    private boolean localDemoMode;
+    private int localDemoNextMessageId = 1;
+    private boolean localDemoMessagesRestored;
+    private final ArrayList<LocalRoundTransition> pendingLocalRoundTransitions = new ArrayList<>();
+    private final HashMap<Integer, LocalRoundTransition> localRoundTransitions = new HashMap<>();
+    private final HashSet<Integer> localRoundMessagesInFlight = new HashSet<>();
+
+    private static final class LocalRoundTransition {
+        final ImageView overlay;
+        final Bitmap bitmap;
+        Runnable onComplete;
+        MessageObject message;
+
+        LocalRoundTransition(ImageView overlay, Bitmap bitmap) {
+            this.overlay = overlay;
+            this.bitmap = bitmap;
+        }
+    }
+
+    private static final class LocalRoundOverlay extends ImageView {
+        boolean behindRecordingBackdrop;
+
+        LocalRoundOverlay(Context context) {
+            super(context);
+        }
+    }
 
     private static int SKELETON_LIGHT_OVERLAY_ALPHA = 22;
     private static float SKELETON_SATURATION = 1.4f;
@@ -2314,7 +2347,7 @@ public class ChatActivity extends BaseFragment implements
 
         @Override
         public void needSendTyping() {
-            if (isQuickRepliesOrWelcomeMessagesMode() || chatMode == MODE_EDIT_BUSINESS_LINK || chatMode == MODE_SUGGESTIONS) return;
+            if (localDemoMode || isQuickRepliesOrWelcomeMessagesMode() || chatMode == MODE_EDIT_BUSINESS_LINK || chatMode == MODE_SUGGESTIONS) return;
             getMessagesController().sendTyping(dialog_id, threadMessageId, 0, classGuid);
         }
 
@@ -2712,10 +2745,225 @@ public class ChatActivity extends BaseFragment implements
 
     private NotificationCenter.ObserversGroup observersGroup;
 
+    private SharedPreferences getLocalDemoPreferences() {
+        return ApplicationLoader.applicationContext.getSharedPreferences(LOCAL_DEMO_PREFS, Context.MODE_PRIVATE);
+    }
+
+    private TLRPC.TL_message createLocalDemoMessage(int id, int date) {
+        TLRPC.TL_message message = new TLRPC.TL_message();
+        message.id = id;
+        message.local_id = id;
+        message.date = date;
+        message.dialog_id = LOCAL_DEMO_USER_ID;
+        message.out = true;
+        message.unread = false;
+        message.from_id = new TLRPC.TL_peerUser();
+        message.from_id.user_id = LOCAL_DEMO_USER_ID;
+        message.peer_id = new TLRPC.TL_peerUser();
+        message.peer_id.user_id = LOCAL_DEMO_USER_ID;
+        message.message = "";
+        return message;
+    }
+
+    private MessageObject createLocalDemoTextMessage(int id, int date, String text) {
+        TLRPC.TL_message message = createLocalDemoMessage(id, date);
+        message.message = text;
+        message.media = new TLRPC.TL_messageMediaEmpty();
+        return new MessageObject(currentAccount, message, true, false);
+    }
+
+    private MessageObject createLocalDemoRoundMessage(
+            int id,
+            int date,
+            String path,
+            double duration,
+            long trimStartUs,
+            long trimEndUs
+    ) {
+        TLRPC.TL_message message = createLocalDemoMessage(id, date);
+        message.flags |= 512;
+        message.attachPath = path;
+
+        TLRPC.TL_document document = new TLRPC.TL_document();
+        document.id = -id;
+        document.access_hash = 0;
+        document.file_reference = new byte[0];
+        document.date = date;
+        document.mime_type = "video/mp4";
+        document.size = path == null ? 0 : new File(path).length();
+        document.dc_id = 0;
+        document.localPath = path;
+
+        TLRPC.TL_documentAttributeVideo video = new TLRPC.TL_documentAttributeVideo();
+        video.round_message = true;
+        video.supports_streaming = true;
+        video.duration = Math.max(1.0, duration);
+        video.w = 400;
+        video.h = 400;
+        document.attributes.add(video);
+
+        TLRPC.TL_messageMediaDocument media = new TLRPC.TL_messageMediaDocument();
+        media.document = document;
+        message.media = media;
+
+        MessageObject object = new MessageObject(currentAccount, message, true, true);
+        if (trimStartUs > 0L || trimEndUs >= 0L) {
+            VideoEditedInfo localEditedInfo = new VideoEditedInfo();
+            localEditedInfo.originalPath = path;
+            localEditedInfo.roundVideo = true;
+            localEditedInfo.startTime = Math.max(0L, trimStartUs);
+            localEditedInfo.endTime = trimEndUs;
+            localEditedInfo.estimatedDuration = Math.max(1L, (long) (duration * 1000.0));
+            object.videoEditedInfo = localEditedInfo;
+        }
+        object.attachPathExists = path != null && new File(path).exists();
+        object.mediaExists = object.attachPathExists;
+        return object;
+    }
+
+    private void addLocalDemoMessage(MessageObject object) {
+        ArrayList<MessageObject> list = new ArrayList<>(1);
+        list.add(object);
+        processNewMessages(list, true);
+    }
+
+    private void persistLocalDemoMessage(JSONObject value) {
+        try {
+            SharedPreferences preferences = getLocalDemoPreferences();
+            JSONArray values = new JSONArray(preferences.getString(LOCAL_DEMO_MESSAGES, "[]"));
+            values.put(value);
+            preferences.edit().putString(LOCAL_DEMO_MESSAGES, values.toString()).apply();
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+    }
+
+    private void sendLocalDemoText(CharSequence value) {
+        String text = value == null ? "" : value.toString().trim();
+        if (text.isEmpty()) {
+            return;
+        }
+        int id = localDemoNextMessageId++;
+        int date = (int) (System.currentTimeMillis() / 1000L);
+        addLocalDemoMessage(createLocalDemoTextMessage(id, date, text));
+        try {
+            JSONObject saved = new JSONObject();
+            saved.put("id", id);
+            saved.put("date", date);
+            saved.put("type", "text");
+            saved.put("text", text);
+            persistLocalDemoMessage(saved);
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+    }
+
+    private void sendLocalDemoRound(String path, VideoEditedInfo videoEditedInfo) {
+        if (TextUtils.isEmpty(path)) {
+            return;
+        }
+        int id = localDemoNextMessageId++;
+        int date = (int) (System.currentTimeMillis() / 1000L);
+        double duration;
+        long trimStartUs = 0L;
+        long trimEndUs = -1L;
+        if (videoEditedInfo == null) {
+            duration = 1.0;
+        } else {
+            long start = Math.max(0L, videoEditedInfo.startTime);
+            long end = videoEditedInfo.endTime;
+            boolean microseconds = start > videoEditedInfo.estimatedDuration * 10L
+                    || end > videoEditedInfo.estimatedDuration * 10L;
+            if (microseconds) {
+                trimStartUs = start;
+                trimEndUs = end;
+                start /= 1000L;
+                if (end > 0L) end /= 1000L;
+            } else {
+                trimStartUs = start * 1000L;
+                trimEndUs = end > 0L ? end * 1000L : -1L;
+            }
+            if (end < 0L) {
+                duration = Math.max(1.0, videoEditedInfo.estimatedDuration / 1000.0);
+            } else {
+                duration = Math.max(1.0, (end - start) / 1000.0);
+            }
+        }
+        MessageObject object = createLocalDemoRoundMessage(
+                id,
+                date,
+                path,
+                duration,
+                trimStartUs,
+                trimEndUs
+        );
+        if (!animatingMessageObjects.contains(object)) {
+            animatingMessageObjects.add(object);
+        }
+        if (!pendingLocalRoundTransitions.isEmpty()) {
+            localRoundTransitions.put(object.getId(), pendingLocalRoundTransitions.remove(0));
+        }
+        addLocalDemoMessage(object);
+        try {
+            JSONObject saved = new JSONObject();
+            saved.put("id", id);
+            saved.put("date", date);
+            saved.put("type", "round");
+            saved.put("path", path);
+            saved.put("duration", duration);
+            saved.put("trim_start_us", trimStartUs);
+            saved.put("trim_end_us", trimEndUs);
+            persistLocalDemoMessage(saved);
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+    }
+
+    private void restoreLocalDemoMessages() {
+        if (!localDemoMode || localDemoMessagesRestored) {
+            return;
+        }
+        localDemoMessagesRestored = true;
+        ArrayList<MessageObject> restored = new ArrayList<>();
+        try {
+            JSONArray values = new JSONArray(getLocalDemoPreferences().getString(LOCAL_DEMO_MESSAGES, "[]"));
+            for (int i = 0; i < values.length(); i++) {
+                JSONObject value = values.optJSONObject(i);
+                if (value == null) {
+                    continue;
+                }
+                int id = value.optInt("id", localDemoNextMessageId);
+                int date = value.optInt("date", (int) (System.currentTimeMillis() / 1000L));
+                localDemoNextMessageId = Math.max(localDemoNextMessageId, id + 1);
+                if ("round".equals(value.optString("type"))) {
+                    String path = value.optString("path", null);
+                    if (!TextUtils.isEmpty(path) && new File(path).exists()) {
+                        restored.add(createLocalDemoRoundMessage(
+                                id,
+                                date,
+                                path,
+                                value.optDouble("duration", 1.0),
+                                value.optLong("trim_start_us", 0L),
+                                value.optLong("trim_end_us", -1L)
+                        ));
+                    }
+                } else {
+                    restored.add(createLocalDemoTextMessage(id, date, value.optString("text", "")));
+                }
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+        if (!restored.isEmpty()) {
+            processNewMessages(restored, false);
+        }
+    }
+
     @Override
     public boolean onFragmentCreate() {
         final long chatId = arguments.getLong("chat_id", 0);
         final long userId = arguments.getLong("user_id", 0);
+        localDemoMode = arguments.getBoolean("local_demo", false);
         final int encId = arguments.getInt("enc_id", 0);
         dialogFolderId = arguments.getInt("dialog_folder_id", 0);
         dialogFilterId = arguments.getInt("dialog_filter_id", 0);
@@ -2768,7 +3016,18 @@ public class ChatActivity extends BaseFragment implements
             }
         }
 
-        if (chatId != 0) {
+        if (localDemoMode) {
+            currentUser = new TLRPC.TL_user();
+            currentUser.id = LOCAL_DEMO_USER_ID;
+            currentUser.first_name = LocaleController.getString(R.string.SavedMessages);
+            currentUser.self = true;
+            currentUser.contact = true;
+            currentUser.status = new TLRPC.TL_userStatusOnline();
+            getMessagesController().putUser(currentUser, false);
+            dialog_id = LOCAL_DEMO_USER_ID;
+            hasQuickReplies = false;
+            forceEmptyHistory();
+        } else if (chatId != 0) {
             currentChat = getMessagesController().getChat(chatId);
             if (currentChat == null) {
                 final CountDownLatch countDownLatch = new CountDownLatch(1);
@@ -3074,7 +3333,7 @@ public class ChatActivity extends BaseFragment implements
             }
         } else {
             getMessagesController().setLastCreatedDialogId(dialog_id, chatMode == MODE_SCHEDULED, true);
-            if (chatMode == 0 || chatMode == MODE_SAVED) {
+            if (!localDemoMode && (chatMode == 0 || chatMode == MODE_SAVED)) {
                 if (currentEncryptedChat == null) {
                     getMediaDataController().loadBotKeyboard(MessagesStorage.TopicKey.of(dialog_id, getTopicId()));
                 }
@@ -3114,7 +3373,7 @@ public class ChatActivity extends BaseFragment implements
             loadInfo = chatInfo == null;
             checkGroupCallJoin(false);
             gotChatInfo();
-        } else if (currentUser != null) {
+        } else if (currentUser != null && !localDemoMode) {
             if (chatMode != MODE_PINNED) {
                 getMessagesController().loadUserInfo(currentUser, true, classGuid, startLoadFromMessageId);
             }
@@ -3219,7 +3478,7 @@ public class ChatActivity extends BaseFragment implements
         if (isTopic || getMessagesController().isMonoForumWithManageRights(dialog_id) && getTopicId() != 0) {
             getMessagesController().getTopicsController().getTopicRepliesCount(dialog_id, getTopicId());
         }
-        if (chatMode != MODE_EDIT_BUSINESS_LINK) {
+        if (!localDemoMode && chatMode != MODE_EDIT_BUSINESS_LINK) {
             getMessagesController().getSavedMessagesController().preloadDialogs(false);
         }
         if (chatMode == MODE_SAVED) {
@@ -6010,6 +6269,14 @@ public class ChatActivity extends BaseFragment implements
 
             @Override
             public boolean drawChild(Canvas canvas, View child, long drawingTime) {
+                if (child instanceof ChatMessageCell) {
+                    MessageObject message = ((ChatMessageCell) child).getMessageObject();
+                    // RecyclerView's item animator may reset cell alpha. Suppress
+                    // the actual draw until its independent flight has handed over.
+                    if (localDemoMode && message != null
+                            && (localRoundTransitions.containsKey(message.getId())
+                            || localRoundMessagesInFlight.contains(message.getId()))) return true;
+                }
                 if (isSkeletonVisible()) {
                     invalidated = false;
                     invalidate();
@@ -7860,6 +8127,18 @@ public class ChatActivity extends BaseFragment implements
             int messageEditTextPredrawScrollY;
 
             @Override
+            public boolean processSendingText(CharSequence text, boolean notify, int scheduleDate, int scheduleRepeatPeriod, long payStars) {
+                if (localDemoMode) {
+                    if (TextUtils.isEmpty(text) || TextUtils.isEmpty(text.toString().trim())) {
+                        return false;
+                    }
+                    sendLocalDemoText(text);
+                    return true;
+                }
+                return super.processSendingText(text, notify, scheduleDate, scheduleRepeatPeriod, payStars);
+            }
+
+            @Override
             protected void onChangedIslandTotalHeight(float h) {
                 checkUi_inputIslandHeight();
             }
@@ -9022,6 +9301,10 @@ public class ChatActivity extends BaseFragment implements
         onBottomItemsVisibilityChanged();
         ViewCompat.setOnApplyWindowInsetsListener(fragmentView, this::onApplyWindowInsets);
         Timer.finish(t);
+
+        if (localDemoMode) {
+            fragmentView.post(this::restoreLocalDemoMessages);
+        }
 
         return fragmentView;
     }
@@ -17665,6 +17948,14 @@ public class ChatActivity extends BaseFragment implements
             if ((scrimView != null || messageEnterTransitionContainer.isRunning()) && (child == sideControlsButtonsLayout || child == floatingDateView || child == floatingTopicSeparator || child == fireworksOverlay || child == quickShareSelectorOverlay || child == gifHintTextView || child == emojiHintTextView || child == undoView || child == topUndoView)) {
                 return false;
             }
+            // Camera content is drawn manually before the input controls, irrespective
+            // of its child index. Round flights must participate in that same ordering.
+            if (child instanceof LocalRoundOverlay) {
+                return true;
+            }
+            if (child == roundVideoRecordBackground) {
+                drawLocalRoundOverlays(canvas, drawingTime, true);
+            }
             if (child == undoView && PhotoViewer.getInstance().isVisible()) {
                 return true;
             }
@@ -17729,6 +18020,7 @@ public class ChatActivity extends BaseFragment implements
                 canvas.restore();
             } else {
                 if (child == chatInputViewsContainer && instantCameraView != null && instantCameraView.getVisibility() == VISIBLE) {
+                    drawLocalRoundOverlays(canvas, drawingTime, false);
                     super.drawChild(canvas, instantCameraView, drawingTime);
                 }
                 result = super.drawChild(canvas, child, drawingTime);
@@ -17769,6 +18061,42 @@ public class ChatActivity extends BaseFragment implements
         @Override
         protected boolean isStatusBarVisible() {
             return false;
+        }
+
+        private final Path localRoundOcclusionPath = new Path();
+        private final int[] localRoundContentPosition = new int[2];
+
+        private void drawLocalRoundOverlays(Canvas canvas, long drawingTime, boolean behindBackdrop) {
+            if (instantCameraView == null || instantCameraView.getVisibility() != VISIBLE) return;
+            RectF camera = instantCameraView.getCameraRect();
+            getLocationOnScreen(localRoundContentPosition);
+            camera.offset(-localRoundContentPosition[0], -localRoundContentPosition[1]);
+            localRoundOcclusionPath.rewind();
+            localRoundOcclusionPath.addOval(camera, Path.Direction.CW);
+            float radius = Math.min(camera.width(), camera.height()) * 0.5f;
+            for (int i = 0; i < getChildCount(); i++) {
+                View child = getChildAt(i);
+                if (!(child instanceof LocalRoundOverlay) || child.getVisibility() != VISIBLE) continue;
+                LocalRoundOverlay flight = (LocalRoundOverlay) child;
+                float width = flight.getWidth() * flight.getScaleX();
+                float height = flight.getHeight() * flight.getScaleY();
+                float cx = flight.getX() + flight.getPivotX() * (1f - flight.getScaleX()) + width * 0.5f;
+                float cy = flight.getY() + flight.getPivotY() * (1f - flight.getScaleY()) + height * 0.5f;
+                // Switch depth only while fully occluded, so the change is invisible.
+                // Continue the flight beneath the real recording backdrop afterward.
+                if (behindBackdrop && !flight.behindRecordingBackdrop && width > 0f
+                        && Math.hypot(cx - camera.centerX(), cy - camera.centerY())
+                        + Math.max(width, height) * 0.5f <= radius) {
+                    flight.behindRecordingBackdrop = true;
+                    flight.setAlpha(1f);
+                }
+                if (flight.behindRecordingBackdrop != behindBackdrop) continue;
+                int save = canvas.save();
+                // Only the overlapped pixels are hidden; the rest keeps moving.
+                canvas.clipPath(localRoundOcclusionPath, Region.Op.DIFFERENCE);
+                super.drawChild(canvas, flight, drawingTime);
+                canvas.restoreToCount(save);
+            }
         }
 
         private void drawChildElement(Canvas canvas, float listTop, ChatMessageCell cell, int type) {
@@ -18718,6 +19046,12 @@ public class ChatActivity extends BaseFragment implements
                     childTop = AndroidUtilities.statusBarHeight;
                 } else if (child == roundVideoRecordBackground || child == messageMetricsView || child == pollAddOptionFieldLayout) {
                     childTop = 0;
+                }
+                if (child instanceof LocalRoundOverlay) {
+                    // These margins are already in content coordinates, without the
+                    // action bar offset that ordinary chat children receive above.
+                    childLeft = lp.leftMargin;
+                    childTop = lp.topMargin;
                 }
                 child.layout(childLeft, childTop, childLeft + width, childTop + height);
             }
@@ -35501,6 +35835,210 @@ public class ChatActivity extends BaseFragment implements
         return currentEncryptedChat != null;
     }
 
+    @Override
+    public boolean isMultiSegmentRoundVideoEnabled() {
+        return localDemoMode;
+    }
+
+    @Override
+    public void prepareRoundVideoTransitionSource(View sourceView) {
+        prepareRoundVideoTransitionSource(sourceView, null);
+    }
+
+    @Override
+    public void prepareRoundVideoTransitionSource(View sourceView, Bitmap sourceBitmap) {
+        if (!localDemoMode || sourceView == null || contentView == null
+                || sourceView.getWidth() <= 0 || sourceView.getHeight() <= 0) {
+            if (sourceBitmap != null && !sourceBitmap.isRecycled()) {
+                sourceBitmap.recycle();
+            }
+            return;
+        }
+        try {
+            Bitmap bitmap;
+            if (sourceBitmap != null && !sourceBitmap.isRecycled()) {
+                bitmap = sourceBitmap;
+            } else {
+                bitmap = Bitmap.createBitmap(
+                        sourceView.getWidth(),
+                        sourceView.getHeight(),
+                        Bitmap.Config.ARGB_8888
+                );
+                Canvas canvas = new Canvas(bitmap);
+                sourceView.draw(canvas);
+            }
+
+            ImageView overlay = new LocalRoundOverlay(getContext());
+            overlay.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            overlay.setImageBitmap(bitmap);
+            overlay.setOutlineProvider(new ViewOutlineProvider() {
+                @Override
+                public void getOutline(View view, Outline outline) {
+                    outline.setOval(0, 0, view.getWidth(), view.getHeight());
+                }
+            });
+            overlay.setClipToOutline(true);
+            overlay.setAlpha(sourceView.getAlpha());
+
+            int[] sourcePosition = new int[2];
+            int[] contentPosition = new int[2];
+            sourceView.getLocationOnScreen(sourcePosition);
+            contentView.getLocationOnScreen(contentPosition);
+            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                    sourceView.getWidth(),
+                    sourceView.getHeight()
+            );
+            params.leftMargin = sourcePosition[0] - contentPosition[0];
+            params.topMargin = sourcePosition[1] - contentPosition[1];
+            int cameraLayerIndex = instantCameraView == null
+                    ? -1
+                    : contentView.indexOfChild(instantCameraView);
+            if (cameraLayerIndex >= 0) {
+                contentView.addView(overlay, cameraLayerIndex, params);
+            } else {
+                contentView.addView(overlay, params);
+            }
+            sourceView.setAlpha(0f);
+            pendingLocalRoundTransitions.add(new LocalRoundTransition(overlay, bitmap));
+        } catch (Throwable error) {
+            if (sourceBitmap != null && !sourceBitmap.isRecycled()) {
+                sourceBitmap.recycle();
+            }
+            FileLog.e(error);
+        }
+    }
+
+    @Override
+    public void prepareRoundVideoTransitionSourceWithCompletion(View sourceView, Runnable onComplete) {
+        int count = pendingLocalRoundTransitions.size();
+        prepareRoundVideoTransitionSource(sourceView);
+        if (pendingLocalRoundTransitions.size() > count) {
+            pendingLocalRoundTransitions.get(count).onComplete = onComplete;
+        } else {
+            onComplete.run();
+        }
+    }
+
+    @Override
+    public void animateRoundVideoThumbnailIntoCamera(View sourceView, Runnable onComplete) {
+        if (!localDemoMode || sourceView == null || contentView == null
+                || instantCameraView == null || sourceView.getWidth() <= 0
+                || sourceView.getHeight() <= 0) {
+            if (onComplete != null) {
+                onComplete.run();
+            }
+            return;
+        }
+        Bitmap bitmap = null;
+        ImageView overlay = null;
+        try {
+            bitmap = Bitmap.createBitmap(
+                    sourceView.getWidth(),
+                    sourceView.getHeight(),
+                    Bitmap.Config.ARGB_8888
+            );
+            sourceView.draw(new Canvas(bitmap));
+
+            overlay = new LocalRoundOverlay(getContext());
+            overlay.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            overlay.setImageBitmap(bitmap);
+            overlay.setOutlineProvider(new ViewOutlineProvider() {
+                @Override
+                public void getOutline(View view, Outline outline) {
+                    outline.setOval(0, 0, view.getWidth(), view.getHeight());
+                }
+            });
+            overlay.setClipToOutline(true);
+            overlay.setAlpha(sourceView.getAlpha());
+
+            int[] sourcePosition = new int[2];
+            int[] contentPosition = new int[2];
+            sourceView.getLocationOnScreen(sourcePosition);
+            contentView.getLocationOnScreen(contentPosition);
+            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                    sourceView.getWidth(),
+                    sourceView.getHeight()
+            );
+            params.leftMargin = sourcePosition[0] - contentPosition[0];
+            params.topMargin = sourcePosition[1] - contentPosition[1];
+            int cameraLayerIndex = contentView.indexOfChild(instantCameraView);
+            if (cameraLayerIndex >= 0) {
+                contentView.addView(overlay, cameraLayerIndex, params);
+            } else {
+                contentView.addView(overlay, params);
+            }
+            sourceView.setAlpha(0f);
+
+            RectF cameraRect = instantCameraView.getCameraRect();
+            float targetScale = cameraRect.width() / sourceView.getWidth();
+            overlay.setPivotX(0f);
+            overlay.setPivotY(0f);
+            ImageView finalOverlay = overlay;
+            Bitmap finalBitmap = bitmap;
+            boolean[] sendStarted = {false};
+            Runnable startSend = () -> {
+                if (sendStarted[0]) return;
+                sendStarted[0] = true;
+                // Retire the thumbnail while it is fully covered by the stationary
+                // camera. It must never outlive the start of the camera's own flight.
+                if (finalOverlay.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) finalOverlay.getParent()).removeView(finalOverlay);
+                }
+                finalOverlay.setImageDrawable(null);
+                if (!finalBitmap.isRecycled()) finalBitmap.recycle();
+                if (onComplete != null) onComplete.run();
+            };
+            ValueAnimator handoff = ValueAnimator.ofFloat(0f, 1f);
+            handoff.addUpdateListener(animation -> {
+                if (sendStarted[0]) return;
+                // Reach the exact camera bounds at the early handoff point, without
+                // waiting for the easing tail and without leaving a second flying image.
+                float progress = Math.min(1f, (float) animation.getAnimatedValue() / 0.90f);
+                float scale = 1f + (targetScale - 1f) * progress;
+                finalOverlay.setScaleX(scale);
+                finalOverlay.setScaleY(scale);
+                finalOverlay.setTranslationX((cameraRect.left - sourcePosition[0]) * progress);
+                finalOverlay.setTranslationY((cameraRect.top - sourcePosition[1]) * progress);
+                contentView.invalidate();
+                if (progress >= 1f) startSend.run();
+            });
+            handoff.setDuration(LOCAL_BATCH_FINAL_HANDOFF_MS);
+            handoff.setInterpolator(CubicBezierInterpolator.DEFAULT);
+            handoff.addListener(new AnimatorListenerAdapter() {
+                private boolean completed;
+
+                private void complete() {
+                    if (completed) return;
+                    completed = true;
+                    startSend.run();
+                }
+
+                @Override
+                public void onAnimationCancel(Animator animation) {
+                    complete();
+                }
+
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    complete();
+                }
+            });
+            handoff.start();
+        } catch (Throwable error) {
+            sourceView.setAlpha(1f);
+            if (overlay != null && overlay.getParent() instanceof ViewGroup) {
+                ((ViewGroup) overlay.getParent()).removeView(overlay);
+            }
+            if (bitmap != null && !bitmap.isRecycled()) {
+                bitmap.recycle();
+            }
+            FileLog.e(error);
+            if (onComplete != null) {
+                onComplete.run();
+            }
+        }
+    }
+
     public boolean isChannel() {
         return ChatObject.isChannelAndNotMegaGroup(currentChat);
     }
@@ -35698,6 +36236,19 @@ public class ChatActivity extends BaseFragment implements
 
         animatorRoundMessageCameraVisibility.setValue(false, true);
 
+        if (localDemoMode && photoEntry.isVideo && videoEditedInfo != null && videoEditedInfo.roundVideo) {
+            sendLocalDemoRound(photoEntry.path, videoEditedInfo);
+            if (closeInstantCameraAnimation != null) {
+                AndroidUtilities.cancelRunOnUIThread(closeInstantCameraAnimation);
+            }
+            AndroidUtilities.runOnUIThread(closeInstantCameraAnimation = () -> {
+                closeInstantCameraAnimation = null;
+                runCloseInstantCameraAnimation();
+            }, 3000);
+            afterMessageSend();
+            return;
+        }
+
         if (editingMessageObject != null && editingMessageObject.needResendWhenEdit() && !ChatObject.canManageMonoForum(currentAccount, editingMessageObject.getDialogId())) {
             final MessageSuggestionParams params = messageSuggestionParams != null ? messageSuggestionParams :
                 MessageSuggestionParams.of(editingMessageObject.messageOwner.suggested_post);
@@ -35741,6 +36292,152 @@ public class ChatActivity extends BaseFragment implements
             }
             afterMessageSend();
         }, stars);
+    }
+
+    @Override
+    public void sendMediaKeepingCamera(MediaController.PhotoEntry photoEntry, VideoEditedInfo videoEditedInfo, boolean notify, int scheduleDate, int scheduleRepeatPeriod, boolean forceDocument, long stars) {
+        if (photoEntry == null) {
+            return;
+        }
+        if (localDemoMode && photoEntry.isVideo && videoEditedInfo != null && videoEditedInfo.roundVideo) {
+            if (closeInstantCameraAnimation != null) {
+                AndroidUtilities.cancelRunOnUIThread(closeInstantCameraAnimation);
+                closeInstantCameraAnimation = null;
+            }
+            sendLocalDemoRound(photoEntry.path, videoEditedInfo);
+            return;
+        }
+        sendMedia(photoEntry, videoEditedInfo, notify, scheduleDate, scheduleRepeatPeriod, forceDocument, stars);
+    }
+
+    private void animateLocalRoundTransition(
+            ChatMessageCell messageCell,
+            LocalRoundTransition transition
+    ) {
+        transition.message = messageCell.getMessageObject();
+        localRoundMessagesInFlight.add(transition.message.getId());
+        messageCell.getViewTreeObserver().addOnPreDrawListener(
+                new ViewTreeObserver.OnPreDrawListener() {
+                    @Override
+                    public boolean onPreDraw() {
+                        messageCell.getViewTreeObserver().removeOnPreDrawListener(this);
+                        if (transition.overlay.getParent() == null) {
+                            finishLocalRoundTransition(transition);
+                            return true;
+                        }
+                        if (closeInstantCameraAnimation != null) {
+                            AndroidUtilities.cancelRunOnUIThread(closeInstantCameraAnimation);
+                            closeInstantCameraAnimation = null;
+                        }
+
+                        ImageReceiver imageReceiver = messageCell.getPhotoImage();
+                        float targetWidth = imageReceiver.getImageWidth();
+                        if (targetWidth <= 0f || transition.overlay.getWidth() <= 0) {
+                            finishLocalRoundTransition(transition);
+                            return true;
+                        }
+
+                        int[] targetPosition = new int[2];
+                        int[] sourcePosition = new int[2];
+                        messageCell.getLocationOnScreen(targetPosition);
+                        transition.overlay.getLocationOnScreen(sourcePosition);
+
+                        messageCell.getTransitionParams().ignoreAlpha = true;
+                        messageCell.setAlpha(0f);
+                        messageCell.setTimeAlpha(0f);
+                        transition.overlay.setPivotX(0f);
+                        transition.overlay.setPivotY(0f);
+                        final float sourceAlpha = transition.overlay.getAlpha();
+                        final float sourceSize = transition.overlay.getWidth();
+                        final float departureY = sourcePosition[1] + sourceSize * 1.25f;
+
+                        ValueAnimator flight = ValueAnimator.ofFloat(0f, 1f);
+                        flight.setDuration(340L);
+                        flight.setInterpolator(CubicBezierInterpolator.DEFAULT);
+                        flight.addUpdateListener(animation -> {
+                            float progress = (float) animation.getAnimatedValue();
+                            // Later messages move the list while earlier circles fly.
+                            // Follow the actual bubble rather than its old destination.
+                            messageCell.getLocationOnScreen(targetPosition);
+                            ImageReceiver currentImage = messageCell.getPhotoImage();
+                            float targetX = targetPosition[0] + currentImage.getImageX();
+                            float targetY = targetPosition[1] + currentImage.getImageY()
+                                    + messageCell.getPaddingTop();
+                            float targetScale = currentImage.getImageWidth() / transition.overlay.getWidth();
+                            // A centred stack is directly above the camera. Give the
+                            // thumbnail a visible downward departure before it grows
+                            // under the camera; keep the exact moving bubble endpoint.
+                            float growth = progress * progress;
+                            float scale = 1f + (targetScale - 1f) * growth;
+                            float remaining = 1f - progress;
+                            float targetCenterX = targetX + currentImage.getImageWidth() * 0.5f;
+                            float targetCenterY = targetY + currentImage.getImageHeight() * 0.5f;
+                            float startCenterX = sourcePosition[0] + sourceSize * 0.5f;
+                            float startCenterY = sourcePosition[1] + sourceSize * 0.5f;
+                            float centerX = startCenterX + (targetCenterX - startCenterX) * growth;
+                            float centerY = remaining * remaining * startCenterY
+                                    + 2f * remaining * progress * departureY
+                                    + growth * targetCenterY;
+                            transition.overlay.setScaleX(scale);
+                            transition.overlay.setScaleY(scale);
+                            transition.overlay.setTranslationX(centerX - sourceSize * scale * 0.5f - sourcePosition[0]);
+                            transition.overlay.setTranslationY(centerY - sourceSize * scale * 0.5f - sourcePosition[1]);
+                            float handoffProgress = Math.max(0f, Math.min(1f,
+                                    (progress - 0.72f) / 0.28f));
+                            transition.overlay.setAlpha(sourceAlpha
+                                    + (1f - sourceAlpha) * handoffProgress);
+                            contentView.invalidate();
+                        });
+                        flight.addListener(new AnimatorListenerAdapter() {
+                            @Override
+                            public void onAnimationEnd(Animator animation) {
+                                // Remove the moving copy before revealing the real cell,
+                                // so the handoff can never draw two circles in one frame.
+                                finishLocalRoundTransition(transition);
+                                messageCell.setAlpha(1f);
+                                messageCell.getTransitionParams().ignoreAlpha = false;
+                                Property<ChatMessageCell, Float> timeAlpha =
+                                        new AnimationProperties.FloatProperty<ChatMessageCell>("alpha") {
+                                            @Override
+                                            public void setValue(ChatMessageCell object, float value) {
+                                                object.setTimeAlpha(value);
+                                            }
+
+                                            @Override
+                                            public Float get(ChatMessageCell object) {
+                                                return object.getTimeAlpha();
+                                            }
+                                        };
+                                AnimatorSet crossfade = new AnimatorSet();
+                                crossfade.playTogether(ObjectAnimator.ofFloat(messageCell, timeAlpha, 1f));
+                                crossfade.setDuration(100L);
+                                crossfade.setInterpolator(new DecelerateInterpolator());
+                                crossfade.start();
+                            }
+                        });
+                        flight.start();
+                        return true;
+                    }
+                }
+        );
+    }
+
+    private void finishLocalRoundTransition(LocalRoundTransition transition) {
+        if (transition == null) return;
+        if (transition.overlay.getParent() instanceof ViewGroup) {
+            ((ViewGroup) transition.overlay.getParent()).removeView(transition.overlay);
+        }
+        transition.overlay.setImageDrawable(null);
+        if (!transition.bitmap.isRecycled()) {
+            transition.bitmap.recycle();
+        }
+        if (transition.message != null) {
+            localRoundMessagesInFlight.remove(transition.message.getId());
+            if (chatListView != null) chatListView.invalidate();
+        }
+        Runnable onComplete = transition.onComplete;
+        transition.onComplete = null;
+        if (onComplete != null) onComplete.run();
     }
 
     private void runCloseInstantCameraAnimation() {
@@ -37874,7 +38571,12 @@ public class ChatActivity extends BaseFragment implements
                     int index;
                     if ((index = animatingMessageObjects.indexOf(message)) != -1) {
                         boolean applyAnimation = false;
-                        if (message.type == MessageObject.TYPE_ROUND_VIDEO && instantCameraView != null && instantCameraView.getTextureView() != null) {
+                        LocalRoundTransition localRoundTransition = localRoundTransitions.remove(message.getId());
+                        if (message.type == MessageObject.TYPE_ROUND_VIDEO
+                                && localRoundTransition != null) {
+                            applyAnimation = true;
+                            animateLocalRoundTransition(messageCell, localRoundTransition);
+                        } else if (message.type == MessageObject.TYPE_ROUND_VIDEO && instantCameraView != null && instantCameraView.getTextureView() != null) {
                             applyAnimation = true;
                             if (closeInstantCameraAnimation != null) {
                                 AndroidUtilities.cancelRunOnUIThread(closeInstantCameraAnimation);

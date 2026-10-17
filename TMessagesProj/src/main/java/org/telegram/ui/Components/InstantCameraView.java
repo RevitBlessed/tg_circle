@@ -3919,6 +3919,11 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
 
         View getFragmentView();
         void sendMedia(MediaController.PhotoEntry entry, VideoEditedInfo videoEditedInfo, boolean notify, int scheduleDate, int scheduleRepeatPeriod, boolean b1, long stars);
+
+        default void sendMediaKeepingCamera(MediaController.PhotoEntry entry, VideoEditedInfo videoEditedInfo, boolean notify, int scheduleDate, int scheduleRepeatPeriod, boolean b1, long stars) {
+            sendMedia(entry, videoEditedInfo, notify, scheduleDate, scheduleRepeatPeriod, b1, stars);
+        }
+
         Activity getParentActivity();
         int getClassGuid();
         long getDialogId();
@@ -3929,6 +3934,32 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
 
         default boolean isInScheduleMode() {
             return false;
+        }
+
+        default boolean isMultiSegmentRoundVideoEnabled() {
+            return false;
+        }
+
+        /**
+         * Captures a completed round-video thumbnail before a local batch send so the
+         * host can animate it independently into the resulting message cell.
+         */
+        default void prepareRoundVideoTransitionSource(View sourceView) {
+        }
+
+        default void prepareRoundVideoTransitionSource(View sourceView, Bitmap sourceBitmap) {
+            prepareRoundVideoTransitionSource(sourceView);
+        }
+
+        default void prepareRoundVideoTransitionSourceWithCompletion(View sourceView, Runnable onComplete) {
+            prepareRoundVideoTransitionSource(sourceView);
+            onComplete.run();
+        }
+
+        default void animateRoundVideoThumbnailIntoCamera(View sourceView, Runnable onComplete) {
+            if (onComplete != null) {
+                onComplete.run();
+            }
         }
     }
 }
