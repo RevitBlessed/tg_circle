@@ -143,6 +143,8 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
     private Bitmap lastBitmap;
     private long lastVisibleDurationMs;
     private float panTranslationY;
+    private boolean rearCameraStartOverride;
+    private RoundVideoSession.CameraFacing cameraBeforeRearGesture;
     private float animationTranslationY;
     private float pinchStartDistance;
     private float zoomProgress;
@@ -482,6 +484,7 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
 
     @Override
     public void destroy(boolean async) {
+        rearCameraStartOverride = false;
         setRecordingUiFrameClockActive(false);
         cancelCameraFlipAnimation();
         if (zoomResetAnimator != null) zoomResetAnimator.cancel();
@@ -561,9 +564,17 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
             upload = new TelegramRoundVideoUpload(currentAccount, secretChat);
         }
         activeOutputResolution = SharedSettings.roundVideoOutputResolution.get();
+        boolean rearCameraStart = consumeRearCameraStart();
+        if (rearCameraStart) {
+            rearCameraStartOverride = true;
+            cameraBeforeRearGesture = SharedSettings.roundVideoLastCamera.get();
+        }
+        RoundVideoSession.CameraFacing initialFacing = rearCameraStart
+                ? RoundVideoSession.CameraFacing.BACK
+                : SharedSettings.roundVideoLastCamera.get();
         session = new RoundVideoSession.Builder(getContext(), textureView)
                 .setOutputDirectory(new File(ApplicationLoader.getFilesDirFixed(), "cache"))
-                .setInitialFacing(SharedSettings.roundVideoLastCamera.get())
+                .setInitialFacing(initialFacing)
                 .setOutputResolution(activeOutputResolution)
                 .setVideoBitrate(SharedSettings.roundVideoVideoBitrate.get())
                 .setCameraResolution(SharedSettings.roundVideoCameraResolution.get())
@@ -999,7 +1010,7 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
                 @NonNull RoundVideoSession.CameraCapabilities cameraCapabilities
         ) {
             capabilities = cameraCapabilities;
-            if (cameraCapabilities.getActiveFacing() != null) {
+            if (cameraCapabilities.getActiveFacing() != null && !rearCameraStartOverride) {
                 SharedSettings.roundVideoLastCamera.set(cameraCapabilities.getActiveFacing());
             }
             updateButtons();
@@ -2030,9 +2041,13 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
                 capabilities.getRequestedFacing() == RoundVideoSession.CameraFacing.FRONT
                         ? RoundVideoSession.CameraFacing.BACK
                         : RoundVideoSession.CameraFacing.FRONT;
+        boolean overrideBefore = rearCameraStartOverride;
+        rearCameraStartOverride = false;
         if (session.setCameraFacing(facing)) {
             switchCameraDrawable.setCurrentFrame(0);
             switchCameraDrawable.start();
+        } else {
+            rearCameraStartOverride = overrideBefore;
         }
     }
 
@@ -2206,14 +2221,14 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
 
     private void showInitialPlaceholder() {
         if (drawInitialPlaceholder) return;
-        if (lastBitmap == null) {
+        if (lastBitmap == null && !rearCameraStartOverride) {
             try {
                 File file = new File(ApplicationLoader.getFilesDirFixed(), "icthumb.jpg");
                 lastBitmap = BitmapFactory.decodeFile(file.getAbsolutePath());
             } catch (Throwable ignore) {
             }
         }
-        if (lastBitmap != null) {
+        if (lastBitmap != null && !rearCameraStartOverride) {
             textureOverlayView.setImageBitmap(lastBitmap);
         } else {
             textureOverlayView.setImageResource(R.drawable.icplaceholder);

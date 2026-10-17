@@ -2481,6 +2481,19 @@ public class ChatActivity extends BaseFragment implements
         }
 
         @Override
+        public boolean supportsRearCameraStart() {
+            return true;
+        }
+
+        @Override
+        public void prepareRoundVideoCamera(boolean rearCamera) {
+            checkInstantCameraView();
+            if (instantCameraView != null) {
+                instantCameraView.setStartWithRearCamera(rearCamera);
+            }
+        }
+
+        @Override
         public void needStartRecordVideo(int state, boolean notify, int scheduleDate, int scheduleRepeatPeriod, int ttl, long effectId, long stars) {
             checkInstantCameraView();
             if (instantCameraView != null) {
@@ -35837,7 +35850,7 @@ public class ChatActivity extends BaseFragment implements
 
     @Override
     public boolean isMultiSegmentRoundVideoEnabled() {
-        return localDemoMode;
+        return true;
     }
 
     @Override
@@ -36308,6 +36321,10 @@ public class ChatActivity extends BaseFragment implements
             return;
         }
         sendMedia(photoEntry, videoEditedInfo, notify, scheduleDate, scheduleRepeatPeriod, forceDocument, stars);
+        if (closeInstantCameraAnimation != null) {
+            AndroidUtilities.cancelRunOnUIThread(closeInstantCameraAnimation);
+            closeInstantCameraAnimation = null;
+        }
     }
 
     private void animateLocalRoundTransition(

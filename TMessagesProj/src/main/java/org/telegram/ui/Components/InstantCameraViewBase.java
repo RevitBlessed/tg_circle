@@ -38,6 +38,17 @@ public abstract class InstantCameraViewBase extends FrameLayout {
     private TrimCallback trimCallback;
     private RecordingUiFrameCallback recordingUiFrameCallback;
     private boolean recordingUiFrameClockActive;
+    private boolean startWithRearCamera;
+
+    public final void setStartWithRearCamera(boolean rearCamera) {
+        startWithRearCamera = rearCamera;
+    }
+
+    protected final boolean consumeRearCameraStart() {
+        boolean rearCamera = startWithRearCamera;
+        startWithRearCamera = false;
+        return rearCamera;
+    }
 
     protected InstantCameraViewBase(Context context) {
         super(context);

@@ -364,6 +364,14 @@ public class ChatActivityEnterView extends FrameLayout implements
 
         void onAudioVideoInterfaceUpdated();
 
+        default boolean supportsRearCameraStart() {
+            return false;
+        }
+
+        default void prepareRoundVideoCamera(boolean rearCamera) {
+
+        }
+
         default void bottomPanelTranslationYChanged(float translation) {
 
         }
@@ -879,10 +887,15 @@ public class ChatActivityEnterView extends FrameLayout implements
     private AnimatedArrowDrawable stickersArrow;
     private boolean removeEmojiViewAfterAnimation;
 
+    private final RoundVideoCameraGesture roundVideoCameraGesture = new RoundVideoCameraGesture();
+    private boolean rearCameraRequested;
+
     private Runnable onFinishInitCameraRunnable = new Runnable() {
         @Override
         public void run() {
             if (delegate != null) {
+                delegate.prepareRoundVideoCamera(rearCameraRequested);
+                rearCameraRequested = false;
                 delegate.needStartRecordVideo(0, true, 0, 0, 0, 0, 0);
             }
         }
@@ -895,6 +908,15 @@ public class ChatActivityEnterView extends FrameLayout implements
         public void run() {
             if (delegate == null || parentActivity == null) {
                 return;
+            }
+            if (isInVideoMode()) {
+                long gestureDelay = roundVideoCameraGesture.delayBeforeStart(SystemClock.uptimeMillis());
+                if (gestureDelay > 0) {
+                    AndroidUtilities.runOnUIThread(recordAudioVideoRunnable, gestureDelay);
+                    return;
+                }
+                rearCameraRequested = roundVideoCameraGesture.isRearSelected();
+                roundVideoCameraGesture.recordingRequested();
             }
             delegate.onPreAudioVideoRecord();
             calledRecordRunnable = true;
@@ -2994,6 +3016,8 @@ public class ChatActivityEnterView extends FrameLayout implements
                 if (isLiveComment) return false;
                 createRecordCircle();
                 if (motionEvent.getAction() == MotionEvent.ACTION_DOWN) {
+                    roundVideoCameraGesture.reset();
+                    rearCameraRequested = false;
                     if (recordCircle.isSendButtonVisible()) {
                         if (!hasRecordVideo || calledRecordRunnable) {
                             startedDraggingX = -1;
@@ -3059,12 +3083,30 @@ public class ChatActivityEnterView extends FrameLayout implements
                     if (hasRecordVideo) {
                         calledRecordRunnable = false;
                         recordAudioVideoRunnableStarted = true;
+                        if (isInVideoMode() && delegate != null && delegate.supportsRearCameraStart()) {
+                            float density = getResources().getDisplayMetrics().density;
+                            roundVideoCameraGesture.begin(
+                                    motionEvent.getRawX() / density,
+                                    motionEvent.getRawY() / density,
+                                    motionEvent.getEventTime());
+                            getParent().requestDisallowInterceptTouchEvent(true);
+                        }
                         AndroidUtilities.runOnUIThread(recordAudioVideoRunnable, 150);
                     } else {
                         recordAudioVideoRunnable.run();
                     }
                     return true;
                 } else if (motionEvent.getAction() == MotionEvent.ACTION_UP || motionEvent.getAction() == MotionEvent.ACTION_CANCEL) {
+                    if (motionEvent.getPointerCount() > 1) {
+                        roundVideoCameraGesture.reset();
+                    }
+                    if (motionEvent.getAction() == MotionEvent.ACTION_CANCEL && recordAudioVideoRunnableStarted) {
+                        AndroidUtilities.cancelRunOnUIThread(recordAudioVideoRunnable);
+                        recordAudioVideoRunnableStarted = false;
+                        roundVideoCameraGesture.reset();
+                        rearCameraRequested = false;
+                        return true;
+                    }
                     if (motionEvent.getAction() == MotionEvent.ACTION_CANCEL && recordingAudioVideo) {
                         if (slideToCancelProgress < 0.7f) {
                             if (hasRecordVideo && isInVideoMode()) {
@@ -3087,6 +3129,9 @@ public class ChatActivityEnterView extends FrameLayout implements
                     if (recordCircle != null && recordCircle.isSendButtonVisible() || recordedAudioPanel != null && recordedAudioPanel.getVisibility() == VISIBLE) {
                         if (recordAudioVideoRunnableStarted) {
                             AndroidUtilities.cancelRunOnUIThread(recordAudioVideoRunnable);
+                            recordAudioVideoRunnableStarted = false;
+                            roundVideoCameraGesture.reset();
+                            rearCameraRequested = false;
                         }
                         return false;
                     }
@@ -3109,6 +3154,9 @@ public class ChatActivityEnterView extends FrameLayout implements
                     } else {
                         if (recordAudioVideoRunnableStarted) {
                             AndroidUtilities.cancelRunOnUIThread(recordAudioVideoRunnable);
+                            recordAudioVideoRunnableStarted = false;
+                            roundVideoCameraGesture.reset();
+                            rearCameraRequested = false;
                             if (sendVoiceEnabled && sendRoundEnabled) {
                                 delegate.onSwitchRecordMode(!isInVideoMode());
                                 setRecordVideoButtonVisible(!isInVideoMode(), true);
@@ -3165,7 +3213,41 @@ public class ChatActivityEnterView extends FrameLayout implements
                         }
                     }
                     return true;
-                } else if (motionEvent.getAction() == MotionEvent.ACTION_MOVE && recordingAudioVideo) {
+                } else if (motionEvent.getAction() == MotionEvent.ACTION_MOVE) {
+                    if (motionEvent.getPointerCount() > 1) {
+                        roundVideoCameraGesture.reset();
+                    }
+                    if (recordAudioVideoRunnableStarted && isInVideoMode()) {
+                        float density = getResources().getDisplayMetrics().density;
+                        float rawX = motionEvent.getRawX();
+                        float rawY = motionEvent.getRawY();
+                        float x = motionEvent.getX();
+                        float y = motionEvent.getY();
+                        float deltaX = rawX - x;
+                        float deltaY = rawY - y;
+                        int historySize = motionEvent.getHistorySize();
+                        boolean selected = false;
+                        for (int h = 0; h < historySize; h++) {
+                            float histRawX = motionEvent.getHistoricalX(h) + deltaX;
+                            float histRawY = motionEvent.getHistoricalY(h) + deltaY;
+                            if (roundVideoCameraGesture.move(histRawX / density, histRawY / density, motionEvent.getHistoricalEventTime(h))) {
+                                selected = true;
+                                break;
+                            }
+                        }
+                        if (!selected) {
+                            selected = roundVideoCameraGesture.move(rawX / density, rawY / density, motionEvent.getEventTime());
+                        }
+                        if (selected) {
+                            AndroidUtilities.cancelRunOnUIThread(recordAudioVideoRunnable);
+                            startedDraggingX = -1;
+                            recordAudioVideoRunnable.run();
+                            return true;
+                        }
+                    }
+                    if (!recordingAudioVideo) {
+                        return true;
+                    }
                     float x = motionEvent.getX();
                     float y = motionEvent.getY();
                     if (recordCircle.isSendButtonVisible()) {
@@ -6540,6 +6622,10 @@ public class ChatActivityEnterView extends FrameLayout implements
             senderSelectPopupWindow.setPauseNotifications(false);
             senderSelectPopupWindow.dismiss();
         }
+        roundVideoCameraGesture.reset();
+        rearCameraRequested = false;
+        AndroidUtilities.cancelRunOnUIThread(recordAudioVideoRunnable);
+        CameraController.getInstance().cancelOnInitRunnable(onFinishInitCameraRunnable);
     }
 
     public void checkChannelRights() {

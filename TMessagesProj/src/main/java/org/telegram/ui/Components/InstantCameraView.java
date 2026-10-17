@@ -145,6 +145,8 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
     private float progress;
     private CameraInfo selectedCamera;
     private boolean isFrontface = true;
+    private boolean cameraBeforeRearGesture = true;
+    private boolean rearCameraStartOverride;
     private volatile boolean cameraReady;
     private AnimatorSet muteAnimation;
     private TLRPC.InputFile file;
@@ -599,6 +601,10 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
     }
 
     public void destroy(boolean async) {
+        if (rearCameraStartOverride) {
+            isFrontface = cameraBeforeRearGesture;
+            rearCameraStartOverride = false;
+        }
         if (useCamera2) {
             for (int a = 0; a < camera2Sessions.length; ++a) {
                 if (camera2Sessions[a] != null) {
@@ -728,7 +734,8 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
 
             }
         }
-        if (lastBitmap != null) {
+        boolean rearCameraStart = consumeRearCameraStart();
+        if (lastBitmap != null && !rearCameraStart) {
             textureOverlayView.setImageBitmap(lastBitmap);
         } else {
             textureOverlayView.setImageResource(R.drawable.icplaceholder);
@@ -738,6 +745,11 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
         if (!fromPaused) {
             if (!useCamera2) {
                 isFrontface = true;
+            }
+            if (rearCameraStart) {
+                cameraBeforeRearGesture = isFrontface;
+                rearCameraStartOverride = true;
+                isFrontface = false;
             }
             updateFlash();
             recordedTime = 0;
@@ -1143,6 +1155,7 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
     }
 
     private void switchCamera() {
+        rearCameraStartOverride = false;
         legacyCameraSwitchStartedNs = SystemClock.elapsedRealtimeNanos();
         legacyCameraSwitchSequence++;
         legacyCameraSwitchTargetSurface = useCamera2 && bothCameras
