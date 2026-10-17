@@ -2497,6 +2497,24 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                 });
             }
 
+            if (BuildVars.DEBUG_VERSION && activityMode == MODE_LOGIN) {
+                TextView demoModeButton = new TextView(context);
+                demoModeButton.setText("Открыть локальный чат");
+                demoModeButton.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 15);
+                demoModeButton.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText));
+                demoModeButton.setGravity(Gravity.CENTER);
+                demoModeButton.setTypeface(AndroidUtilities.bold());
+                demoModeButton.setPadding(0, dp(12), 0, dp(12));
+                demoModeButton.setOnClickListener(v -> {
+                    Bundle args = new Bundle();
+                    args.putLong("user_id", ChatActivity.LOCAL_DEMO_USER_ID);
+                    args.putBoolean("local_demo", true);
+                    presentFragment(new ChatActivity(args));
+                });
+                addView(demoModeButton, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL, 16, 0, 16, 0));
+                bottomMargin -= 24;
+            }
+
             if (bottomMargin > 0 && !AndroidUtilities.isSmallScreen()) {
                 Space bottomSpacer = new Space(context);
                 bottomSpacer.setMinimumHeight(AndroidUtilities.dp(bottomMargin));
