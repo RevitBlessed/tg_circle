@@ -14585,6 +14585,8 @@ public class ChatActivityEnterView extends FrameLayout implements
     }
 
     public class TimerView extends View {
+        final RoundVideoRecordingFeedback recordingFeedback =
+                new RoundVideoRecordingFeedback(this);
         boolean isRunning;
         boolean stoppedInternal;
         String oldString;
@@ -14614,8 +14616,11 @@ public class ChatActivityEnterView extends FrameLayout implements
 
         public void start(long milliseconds) {
             isRunning = true;
-            startTime = System.currentTimeMillis() - milliseconds;
+            startTime = SystemClock.elapsedRealtime() - milliseconds;
             externalElapsedMs = milliseconds;
+            if (milliseconds == 0L) {
+                recordingFeedback.reset();
+            }
             lastSendTypingTime = startTime;
             invalidate();
         }
@@ -14636,7 +14641,7 @@ public class ChatActivityEnterView extends FrameLayout implements
             if (isRunning) {
                 isRunning = false;
                 if (startTime > 0) {
-                    stopTime = System.currentTimeMillis();
+                    stopTime = SystemClock.elapsedRealtime();
                 }
                 invalidate();
             }
@@ -14652,7 +14657,7 @@ public class ChatActivityEnterView extends FrameLayout implements
                 textPaint.setTypeface(AndroidUtilities.bold());
                 textPaint.setColor(getThemedColor(Theme.key_chat_recordTime));
             }
-            long currentTimeMillis = System.currentTimeMillis();
+            long currentTimeMillis = SystemClock.elapsedRealtime();
             long t = isRunning
                     ? externalFrameClock ? externalElapsedMs : currentTimeMillis - startTime
                     : stopTime - startTime;
@@ -14660,11 +14665,18 @@ public class ChatActivityEnterView extends FrameLayout implements
             int ms = (int) (t % 1000L) / 10;
 
             if (isInVideoMode()) {
+                if (isRunning && !stoppedInternal && !destroyed) {
+                    recordingFeedback.update(t);
+                }
                 if (t >= 59500 && !stoppedInternal) {
+                    boolean reachedWhileRecording = isRunning;
+                    stoppedInternal = true;
                     startedDraggingX = -1;
                     delegate.needStartRecordVideo(3, true, 0, 0, voiceOnce ? 0x7FFFFFFF : 0, effectId, 0);
                     sendButton.setEffect(effectId = 0);
-                    stoppedInternal = true;
+                    if (reachedWhileRecording) {
+                        recordingFeedback.onLimitReached(t);
+                    }
                 }
             }
 
@@ -14815,6 +14827,7 @@ public class ChatActivityEnterView extends FrameLayout implements
             externalElapsedMs = 0;
             lastDrawRealtimeMs = 0;
             stoppedInternal = false;
+            recordingFeedback.reset();
         }
     }
 
