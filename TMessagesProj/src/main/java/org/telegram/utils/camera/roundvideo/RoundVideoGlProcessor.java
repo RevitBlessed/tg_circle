@@ -123,7 +123,6 @@ final class RoundVideoGlProcessor {
     private volatile boolean started;
     private volatile boolean recordingStarted;
     private volatile Runnable firstFrameListener;
-    private int firstFrameThreshold = 1;
     private Runnable dualSwitchFrameListener;
     private boolean firstFrameReported;
     private volatile RuntimeException initializationError;
@@ -350,9 +349,8 @@ final class RoundVideoGlProcessor {
         });
     }
 
-    public void setFirstFrameListener(@Nullable Runnable listener, int minimumActiveFrames) {
+    public void setFirstFrameListener(@Nullable Runnable listener) {
         firstFrameListener = listener;
-        firstFrameThreshold = Math.max(1, minimumActiveFrames);
     }
 
     public void onCameraSessionConfigured() {
@@ -666,8 +664,7 @@ final class RoundVideoGlProcessor {
             if (!recordingStarted) {
                 renderPreviewAndNotify(cameraTexture, matrix);
                 Runnable listener = firstFrameListener;
-                if (!firstFrameReported && listener != null
-                        && inputCount >= firstFrameThreshold) {
+                if (!firstFrameReported && listener != null) {
                     firstFrameReported = true;
                     listener.run();
                 }

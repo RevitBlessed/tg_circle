@@ -238,9 +238,6 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
     private Size oldTexturePreviewSize;
 
     private boolean flipAnimationInProgress;
-    private boolean initialCameraFlipPending;
-    private boolean cameraOpenAnimationFinished;
-    private ValueAnimator cameraFlipAnimator;
 
     private View parentView;
     public boolean opened;
@@ -341,7 +338,54 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
             if (!cameraReady || !isCameraSessionInitiated() || cameraThread == null) {
                 return;
             }
-            animateCameraFlip(true);
+            if (!bothCameras) {
+                switchCamera();
+            }
+            if (switchCameraDrawable != null) {
+                switchCameraDrawable.setCurrentFrame(0);
+                switchCameraDrawable.start();
+            }
+            flipAnimationInProgress = true;
+            ValueAnimator valueAnimator = ValueAnimator.ofFloat(0, 1f);
+            valueAnimator.setDuration(580);
+            valueAnimator.setInterpolator(CubicBezierInterpolator.EASE_OUT_QUINT);
+            final boolean[] didSwap = new boolean[1];
+            Runnable doSwap = () -> {
+                if (bothCameras) {
+                    switchCamera();
+                }
+            };
+            cameraContainer.setCameraDistance(cameraContainer.getMeasuredHeight() * 8f);
+            textureOverlayView.setCameraDistance(textureOverlayView.getMeasuredHeight() * 8f);
+            valueAnimator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                @Override
+                public void onAnimationUpdate(ValueAnimator valueAnimator) {
+                    float p = (float) valueAnimator.getAnimatedValue();
+                    if (p > 0.5f && !didSwap[0]) {
+                        didSwap[0] = true;
+                        doSwap.run();
+                    }
+                    float rotation = p < 0.5f ? p : p - 1f;
+                    rotation *= 180;
+                    cameraContainer.setRotationY(rotation);
+                    textureOverlayView.setRotationY(rotation);
+                }
+            });
+            valueAnimator.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    super.onAnimationEnd(animation);
+                    if (!didSwap[0]) {
+                        didSwap[0] = true;
+                        doSwap.run();
+                    }
+                    cameraContainer.setRotationY(0f);
+                    textureOverlayView.setRotationY(0f);
+                    flipAnimationInProgress = false;
+                    invalidate();
+                }
+            });
+            valueAnimator.start();
         });
 
         flashButton = new FlashViews.ImageViewInvertable(context);
@@ -555,9 +599,6 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
     }
 
     public void destroy(boolean async) {
-        pendingGestureCameraFlip = false;
-        initialCameraFlipPending = false;
-        cancelCameraFlipAnimation();
         if (useCamera2) {
             for (int a = 0; a < camera2Sessions.length; ++a) {
                 if (camera2Sessions[a] != null) {
@@ -669,8 +710,6 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
         if (textureView != null) {
             return;
         }
-        initialCameraFlipPending = !fromPaused && flipCameraOnNextStart;
-        cameraOpenAnimationFinished = false;
 
         if (switchCameraDrawable == null) {
             switchCameraDrawable = new RLottieDrawable(R.raw.roundcamera_flip, buttonsSizePx, buttonsSizePx);
@@ -689,7 +728,7 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
 
             }
         }
-        if (lastBitmap != null && !flipCameraOnNextStart) {
+        if (lastBitmap != null) {
             textureOverlayView.setImageBitmap(lastBitmap);
         } else {
             textureOverlayView.setImageResource(R.drawable.icplaceholder);
@@ -699,10 +738,6 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
         if (!fromPaused) {
             if (!useCamera2) {
                 isFrontface = true;
-            }
-            if (flipCameraOnNextStart) {
-                isFrontface = !isFrontface;
-                flipCameraOnNextStart = false;
             }
             updateFlash();
             recordedTime = 0;
@@ -844,10 +879,6 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
     }
 
     public void startAnimation(boolean open, boolean fromPaused) {
-        if (!open) {
-            initialCameraFlipPending = false;
-            cancelCameraFlipAnimation();
-        }
         dispatchAnimationState(open, fromPaused);
         if (animatorSet != null) {
             animatorSet.removeAllListeners();
@@ -905,14 +936,6 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
             });
         } else {
             setTranslationX(0);
-            animatorSet.addListener(new AnimatorListenerAdapter() {
-                @Override
-                public void onAnimationEnd(Animator animation) {
-                    if (animation != animatorSet) return;
-                    cameraOpenAnimationFinished = true;
-                    maybeAnimateInitialCameraFlip();
-                }
-            });
         }
         animatorSet.setDuration(180);
         animatorSet.setInterpolator(new DecelerateInterpolator());
@@ -1117,92 +1140,6 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
         }
         textureView = null;
         cameraContainer.setImageReceiver(null);
-    }
-
-    @Override
-    public void flipCamera() {
-        if (flipAnimationInProgress || cancelled || textureView == null || (isPaused() && cameraReady)) return;
-        pendingGestureCameraFlip = true;
-        applyPendingGestureCameraFlip();
-    }
-
-    private boolean pendingGestureCameraFlip;
-
-    private void applyPendingGestureCameraFlip() {
-        maybeAnimateInitialCameraFlip();
-        if (!pendingGestureCameraFlip || !cameraReady || !isCameraSessionInitiated()
-                || cameraThread == null || isPaused() || flipAnimationInProgress) return;
-        pendingGestureCameraFlip = false;
-        switchCameraButton.performClick();
-    }
-
-    private void maybeAnimateInitialCameraFlip() {
-        if (!initialCameraFlipPending || !cameraOpenAnimationFinished || !cameraReady
-                || !recording || !opened || cancelled || flipAnimationInProgress) return;
-        initialCameraFlipPending = false;
-        animateCameraFlip(false);
-    }
-
-    // The starting camera has already been selected for a quick swipe. Reuse
-    // the normal UI rotation without switching the recorder a second time.
-    private void animateCameraFlip(boolean switchFacing) {
-        if (flipAnimationInProgress) return;
-        if (switchFacing && !bothCameras) switchCamera();
-        if (switchCameraDrawable != null) {
-            switchCameraDrawable.setCurrentFrame(0);
-            switchCameraDrawable.start();
-        }
-        flipAnimationInProgress = true;
-        cameraContainer.setCameraDistance(cameraContainer.getMeasuredHeight() * 8f);
-        textureOverlayView.setCameraDistance(textureOverlayView.getMeasuredHeight() * 8f);
-        final boolean[] didSwap = new boolean[1];
-        Runnable doSwap = () -> {
-            if (switchFacing && bothCameras) switchCamera();
-        };
-        cameraFlipAnimator = ValueAnimator.ofFloat(0f, 1f);
-        cameraFlipAnimator.setDuration(580);
-        cameraFlipAnimator.setInterpolator(CubicBezierInterpolator.EASE_OUT_QUINT);
-        cameraFlipAnimator.addUpdateListener(animation -> {
-            float p = (float) animation.getAnimatedValue();
-            if (p > .5f && !didSwap[0]) {
-                didSwap[0] = true;
-                doSwap.run();
-            }
-            float rotation = (p < .5f ? p : p - 1f) * 180f;
-            cameraContainer.setRotationY(rotation);
-            textureOverlayView.setRotationY(rotation);
-        });
-        cameraFlipAnimator.addListener(new AnimatorListenerAdapter() {
-            @Override
-            public void onAnimationEnd(Animator animation) {
-                if (animation != cameraFlipAnimator) return;
-                if (!didSwap[0]) doSwap.run();
-                cameraFlipAnimator = null;
-                cameraContainer.setRotationY(0f);
-                textureOverlayView.setRotationY(0f);
-                flipAnimationInProgress = false;
-                invalidate();
-            }
-        });
-        cameraFlipAnimator.start();
-    }
-
-    private void cancelCameraFlipAnimation() {
-        if (cameraFlipAnimator != null) {
-            cameraFlipAnimator.removeAllListeners();
-            cameraFlipAnimator.cancel();
-            cameraFlipAnimator = null;
-        }
-        cameraContainer.setRotationY(0f);
-        textureOverlayView.setRotationY(0f);
-        flipAnimationInProgress = false;
-    }
-
-    private boolean flipCameraOnNextStart;
-
-    @Override
-    public void flipCameraOnNextStart() {
-        flipCameraOnNextStart = !flipCameraOnNextStart;
     }
 
     private void switchCamera() {
@@ -1916,7 +1853,6 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
                 if (videoEncoder.started) {
                     if (!cameraReady) {
                         cameraReady = true;
-                        AndroidUtilities.runOnUIThread(InstantCameraView.this::applyPendingGestureCameraFlip);
                         AndroidUtilities.runOnUIThread(() -> textureOverlayView.animate().setDuration(120).alpha(0.0f).setInterpolator(new DecelerateInterpolator()).start());
                     }
                 } else {
@@ -1937,7 +1873,6 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
                     scaleY = temp;
                 }
                 recording = true;
-                AndroidUtilities.runOnUIThread(InstantCameraView.this::applyPendingGestureCameraFlip);
                 updateFlash();
             }
 
@@ -2820,13 +2755,11 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
                     oldCameraTexture[0] = 0;
                     if (!cameraReady) {
                         cameraReady = true;
-                        AndroidUtilities.runOnUIThread(InstantCameraView.this::applyPendingGestureCameraFlip);
                         AndroidUtilities.runOnUIThread(() -> textureOverlayView.animate().setDuration(120).alpha(0.0f).setInterpolator(new DecelerateInterpolator()).start());
                     }
                 }
             } else if (!cameraReady) {
                 cameraReady = true;
-                AndroidUtilities.runOnUIThread(InstantCameraView.this::applyPendingGestureCameraFlip);
                 AndroidUtilities.runOnUIThread(() -> textureOverlayView.animate().setDuration(120).alpha(0.0f).setInterpolator(new DecelerateInterpolator()).start());
             }
         }
@@ -3384,7 +3317,6 @@ public class InstantCameraView extends InstantCameraViewBase implements Notifica
                     recordPlusTime = fromPause ? recordedTime : 0;
                     recordStartTime = System.currentTimeMillis();
                     recording = true;
-                    AndroidUtilities.runOnUIThread(InstantCameraView.this::applyPendingGestureCameraFlip);
                     updateFlash();
                     invalidate();
                     NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.recordStarted, recordingGuid, false);

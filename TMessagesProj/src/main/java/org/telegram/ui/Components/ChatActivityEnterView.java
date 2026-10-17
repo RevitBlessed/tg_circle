@@ -328,10 +328,6 @@ public class ChatActivityEnterView extends FrameLayout implements
 
         void toggleVideoRecordingPause();
 
-        default void flipRecordingCamera() {}
-
-        default void prepareRecordingCameraFlip(boolean flip) {}
-
         boolean isVideoRecordingPaused();
 
         void needChangeVideoPreviewState(int state, float seekProgress);
@@ -1228,9 +1224,6 @@ public class ChatActivityEnterView extends FrameLayout implements
         private Drawable micDrawable;
         private Drawable vidDrawable;
 
-        private final RLottieDrawable flipHintDrawable = new RLottieDrawable(R.raw.roundcamera_flip, dp(24), dp(24));
-        private final AnimatedFloat flipHintHidden = new AnimatedFloat(this, 0, 220, CubicBezierInterpolator.EASE_OUT_QUINT);
-
         @Override
         public void setAlpha(float alpha) {
             super.setAlpha(alpha);
@@ -1245,7 +1238,6 @@ public class ChatActivityEnterView extends FrameLayout implements
 
         public ControlsView(Context context) {
             super(context);
-            flipHintDrawable.setMasterParent(this);
 
             virtualViewHelper = new VirtualViewHelper(this);
             ViewCompat.setAccessibilityDelegate(this, virtualViewHelper);
@@ -1408,9 +1400,6 @@ public class ChatActivityEnterView extends FrameLayout implements
                     yAdd = dp(57);
                 }
             }
-            if (!sendButtonVisible && videoGestureSector == VIDEO_GESTURE_FLIP_LOCK) {
-                yAdd = dp(57) * flipLockProgress;
-            }
 
             final int cx = getMeasuredWidth() - AndroidUtilities.dp2(26);
             float moveProgress = 1.0f - yAdd / dp(57);
@@ -1569,46 +1558,8 @@ public class ChatActivityEnterView extends FrameLayout implements
                 dy = maxTranslationDy;
             }
             float s = (1f - hidePause) * controlsScale * (1f - exitProgress2) * slideToCancelLockProgress;
-
-            if (isInVideoMode) {
-                final float visible = 1f - flipHintHidden.set(sendButtonVisible);
-                if (visible > 0f) {
-                    // Only the diagonal gesture pulls the camera hint upward.
-                    // Keep its own geometry while the lock moves and turns into pause.
-                    final float flipMoveProgress = 1f - flipLockProgress;
-                    final boolean coupled = !sendButtonVisible && videoGestureSector == VIDEO_GESTURE_FLIP_LOCK;
-                    final float flipSize = coupled ? lockSize : dp(36) + dp(14) * flipMoveProgress;
-                    final float flipY = coupled ? lockY + dy : dp(60) + multilinTooltipOffset + dp(30) * (1f - sc)
-                            - dp(57) * flipLockProgress - dp(8) * idleProgress * flipMoveProgress + dy;
-                    final float flipCx = cx - dpf2(48);
-                    final float flipCy = flipY + flipSize / 2f;
-                    final int flipSave = canvas.save();
-                    canvas.scale(s, s, flipCx, flipCy);
-                    final int hintSave = canvas.saveLayerAlpha(flipCx - dp(24), flipY - dp(4),
-                            flipCx + dp(24), flipY + flipSize + dp(4), (int) (255 * visible), Canvas.ALL_SAVE_FLAG);
-                    canvas.scale(.8f + .2f * visible, .8f + .2f * visible, flipCx, flipCy);
-                    rectF.set(flipCx - dp(18), flipY, flipCx + dp(18), flipY + flipSize);
-                    if (lockBackgroundDrawable != null) {
-                        lockBackgroundDrawable.setBounds((int) rectF.left - dp(3), (int) rectF.top - dp(3),
-                                (int) rectF.right + dp(3), (int) rectF.bottom + dp(3));
-                        lockBackgroundDrawable.draw(canvas);
-                    } else {
-                        lockShadowDrawable.setBounds((int) rectF.left - dp(3), (int) rectF.top - dp(3),
-                                (int) rectF.right + dp(3), (int) rectF.bottom + dp(3));
-                        lockShadowDrawable.draw(canvas);
-                        canvas.drawRoundRect(rectF, dp(18), dp(18), lockBackgroundPaint);
-                    }
-                    flipHintDrawable.setCurrentFrame((int) (flipLockProgress * (flipHintDrawable.getFramesCount() - 1)));
-                    flipHintDrawable.setBounds((int) flipCx - dp(12), (int) flipCy - dp(12),
-                            (int) flipCx + dp(12), (int) flipCy + dp(12));
-                    flipHintDrawable.setAlpha(lockPaint.getAlpha());
-                    flipHintDrawable.draw(canvas);
-                    canvas.restoreToCount(hintSave);
-                    canvas.restoreToCount(flipSave);
-                }
-            }
-
             canvas.scale(s, s, cx, lockMiddleY + dy);
+
             rectF.set(cx - dpf2(18), lockY + dy, cx + dpf2(18), lockY + dy + lockSize);
 
             if (lockBackgroundDrawable != null){
@@ -1978,132 +1929,7 @@ public class ChatActivityEnterView extends FrameLayout implements
     private float slideToCancelLockProgress;
     private boolean canceledByGesture;
     private boolean sendButtonVisible;
-    private float recordTouchDownX, recordTouchDownY;
-    private long recordTouchDownTime;
-    private float flipLockProgress;
-    private boolean earlyVideoGestureConsumed;
-    private int videoGestureSector;
-    private ValueAnimator diagonalGestureAnimator;
-    private Runnable completeDiagonalGestureRunnable;
-    private boolean diagonalGestureCompleting;
-    private boolean diagonalGestureCommitted;
     private int slideDelta;
-
-    private static final int VIDEO_GESTURE_NONE = 0;
-    private static final int VIDEO_GESTURE_CANCEL = 1;
-    private static final int VIDEO_GESTURE_FLIP_LOCK = 2;
-    private static final int VIDEO_GESTURE_LOCK = 3;
-    private static final int RECORD_HOLD_DELAY_MS = 150;
-    private static final int VIDEO_START_GESTURE_WINDOW_MS = 280;
-
-    private int getPendingVideoGestureSector(float up, float left) {
-        // Before opening a camera, accept a short, unambiguous diagonal. Keep
-        // the wider 38dp dead zone for selecting the other two directions.
-        if (up >= dp(12) && left >= dp(12) && left >= up * .6f && left <= up / .6f
-                && Math.hypot(up, left) >= dp(20)) {
-            return VIDEO_GESTURE_FLIP_LOCK;
-        }
-        return getVideoGestureSector(up, left, dp(38));
-    }
-
-    private int getVideoGestureSector(float up, float left, float threshold) {
-        if ((up <= 0f && left <= 0f)
-                || Math.hypot(Math.max(0f, up), Math.max(0f, left)) < threshold) {
-            return VIDEO_GESTURE_NONE;
-        }
-        if (up <= 0f) return VIDEO_GESTURE_CANCEL;
-        if (left <= 0f) return VIDEO_GESTURE_LOCK;
-        float horizontalToVertical = left / up;
-        // Give the combined camera-flip + lock gesture the widest corridor.
-        // Once a sector is selected it stays selected until the finger is lifted.
-        if (horizontalToVertical > 2.75f) return VIDEO_GESTURE_CANCEL;
-        if (horizontalToVertical < .36f) return VIDEO_GESTURE_LOCK;
-        return VIDEO_GESTURE_FLIP_LOCK;
-    }
-
-    private void startAndLockEarlyVideoGesture(boolean flipCamera) {
-        AndroidUtilities.cancelRunOnUIThread(recordAudioVideoRunnable);
-        if (flipCamera) {
-            delegate.prepareRecordingCameraFlip(true);
-        }
-        recordAudioVideoRunnable.run();
-        if (!recordingAudioVideo || recordCircle == null) {
-            delegate.prepareRecordingCameraFlip(false);
-            return;
-        }
-        // Entering the recording UI resets RecordCircle. Restore this touch's sector
-        // before starting any animation or accepting further motion events.
-        videoGestureSector = flipCamera ? VIDEO_GESTURE_FLIP_LOCK : VIDEO_GESTURE_LOCK;
-        recordCircle.setLockTranslationVisual(0f);
-        if (flipCamera) {
-            completeDiagonalGesture(true);
-        } else {
-            flipLockProgress = 0f;
-            recordCircle.setLockTranslation(-dp(57));
-            startLockTransition();
-        }
-    }
-
-    private void setDiagonalGestureProgress(float progress) {
-        if (recordCircle == null) return;
-        progress = MathUtils.clamp(progress, 0f, 1f);
-        flipLockProgress = progress;
-        recordCircle.setLockTranslationVisual(startTranslation - dp(57) * progress);
-        if (controlsView != null) controlsView.invalidate();
-    }
-
-    private void completeDiagonalGesture(boolean cameraAlreadyPrepared) {
-        if (diagonalGestureCompleting || diagonalGestureCommitted || recordCircle == null) return;
-        diagonalGestureCompleting = true;
-        earlyVideoGestureConsumed = true;
-        // One writer owns progress until both hints finish. Touch events cannot
-        // rewind the flip while the lock is already being committed.
-        completeDiagonalGestureRunnable = () -> {
-            completeDiagonalGestureRunnable = null;
-            diagonalGestureCompleting = false;
-            if (!recordingAudioVideo || recordCircle == null || videoGestureSector != VIDEO_GESTURE_FLIP_LOCK) return;
-            setDiagonalGestureProgress(1f);
-            diagonalGestureCommitted = true;
-            if (!cameraAlreadyPrepared) {
-                delegate.flipRecordingCamera();
-            }
-            if (recordCircle.setLockTranslation(startTranslation - dp(57)) == 2) {
-                startLockTransition();
-            }
-        };
-        diagonalGestureAnimator = ValueAnimator.ofFloat(flipLockProgress, 1f);
-        diagonalGestureAnimator.setDuration(Math.max(80, (long) (110 * (1f - flipLockProgress))));
-        diagonalGestureAnimator.setInterpolator(CubicBezierInterpolator.EASE_OUT_QUINT);
-        diagonalGestureAnimator.addUpdateListener(animation -> setDiagonalGestureProgress((float) animation.getAnimatedValue()));
-        diagonalGestureAnimator.addListener(new AnimatorListenerAdapter() {
-            @Override
-            public void onAnimationEnd(Animator animation) {
-                if (diagonalGestureAnimator != animation) return;
-                diagonalGestureAnimator = null;
-                if (controlsView != null) {
-                    controlsView.postOnAnimation(completeDiagonalGestureRunnable);
-                } else {
-                    AndroidUtilities.runOnUIThread(completeDiagonalGestureRunnable);
-                }
-            }
-        });
-        diagonalGestureAnimator.start();
-    }
-
-    private void cancelDiagonalGestureCompletion() {
-        if (diagonalGestureAnimator != null) {
-            diagonalGestureAnimator.removeAllListeners();
-            diagonalGestureAnimator.cancel();
-            diagonalGestureAnimator = null;
-        }
-        if (completeDiagonalGestureRunnable != null) {
-            AndroidUtilities.cancelRunOnUIThread(completeDiagonalGestureRunnable);
-            if (controlsView != null) controlsView.removeCallbacks(completeDiagonalGestureRunnable);
-            completeDiagonalGestureRunnable = null;
-        }
-        diagonalGestureCompleting = false;
-        diagonalGestureCommitted = false;
-    }
 
     @Keep
     public float getExitTransition() {
@@ -2284,15 +2110,9 @@ public class ChatActivityEnterView extends FrameLayout implements
 
         public void resetLockTranslation(boolean toLock) {
             if (!toLock) {
-                cancelDiagonalGestureCompletion();
-                flipLockProgress = 0f;
-                if (controlsView != null) {
-                    controlsView.flipHintHidden.set(0f, true);
-                }
                 sendButtonVisible = false;
                 lockAnimatedTranslation = -1;
                 startTranslation = -1;
-                videoGestureSector = VIDEO_GESTURE_NONE;
                 slideToCancelProgress = 1f;
                 slideToCancelLockProgress = 1f;
                 snapAnimationProgress = 0;
@@ -2317,9 +2137,6 @@ public class ChatActivityEnterView extends FrameLayout implements
             if (sendButtonVisible) {
                 return 2;
             }
-            if (videoGestureSector == VIDEO_GESTURE_FLIP_LOCK && !diagonalGestureCommitted) {
-                return 1;
-            }
             if (lockAnimatedTranslation == -1) {
                 startTranslation = value;
             }
@@ -2336,16 +2153,6 @@ public class ChatActivityEnterView extends FrameLayout implements
                 return 2;
             }
             return 1;
-        }
-
-        public void setLockTranslationVisual(float value) {
-            if (sendButtonVisible) return;
-            if (startTranslation == -1) {
-                startTranslation = value;
-            }
-            lockAnimatedTranslation = value;
-            invalidate();
-            if (controlsView != null) controlsView.invalidate();
         }
 
         @SuppressLint("DrawAllocation")
@@ -3187,13 +2994,6 @@ public class ChatActivityEnterView extends FrameLayout implements
                 if (isLiveComment) return false;
                 createRecordCircle();
                 if (motionEvent.getAction() == MotionEvent.ACTION_DOWN) {
-                    cancelDiagonalGestureCompletion();
-                    recordTouchDownX = motionEvent.getRawX();
-                    recordTouchDownY = motionEvent.getRawY();
-                    recordTouchDownTime = motionEvent.getEventTime();
-                    flipLockProgress = 0f;
-                    earlyVideoGestureConsumed = false;
-                    videoGestureSector = VIDEO_GESTURE_NONE;
                     if (recordCircle.isSendButtonVisible()) {
                         if (!hasRecordVideo || calledRecordRunnable) {
                             startedDraggingX = -1;
@@ -3257,65 +3057,14 @@ public class ChatActivityEnterView extends FrameLayout implements
                     }
 
                     if (hasRecordVideo) {
-                        getParent().requestDisallowInterceptTouchEvent(true);
                         calledRecordRunnable = false;
                         recordAudioVideoRunnableStarted = true;
-                        // Decide the initial facing before opening/encoding any camera.
-                        // A confirmed swipe starts immediately; a stationary hold waits
-                        // only for this bounded intent-selection window.
-                        AndroidUtilities.runOnUIThread(recordAudioVideoRunnable,
-                                isInVideoMode() ? VIDEO_START_GESTURE_WINDOW_MS : RECORD_HOLD_DELAY_MS);
+                        AndroidUtilities.runOnUIThread(recordAudioVideoRunnable, 150);
                     } else {
                         recordAudioVideoRunnable.run();
                     }
                     return true;
                 } else if (motionEvent.getAction() == MotionEvent.ACTION_UP || motionEvent.getAction() == MotionEvent.ACTION_CANCEL) {
-                    if (motionEvent.getAction() == MotionEvent.ACTION_CANCEL && recordAudioVideoRunnableStarted) {
-                        AndroidUtilities.cancelRunOnUIThread(recordAudioVideoRunnable);
-                        recordAudioVideoRunnableStarted = false;
-                        return true;
-                    }
-                    if (diagonalGestureCompleting || diagonalGestureAnimator != null) {
-                        return true;
-                    }
-                    if (earlyVideoGestureConsumed) {
-                        earlyVideoGestureConsumed = false;
-                        return true;
-                    }
-                    // A fast swipe can deliver its last displacement only on UP.
-                    if (motionEvent.getAction() == MotionEvent.ACTION_UP && hasRecordVideo
-                            && isInVideoMode() && !sendButtonVisible) {
-                        float up = recordTouchDownY - motionEvent.getRawY();
-                        float left = recordTouchDownX - motionEvent.getRawX();
-                        if (videoGestureSector == VIDEO_GESTURE_NONE) {
-                            videoGestureSector = recordAudioVideoRunnableStarted
-                                    ? getPendingVideoGestureSector(up, left)
-                                    : getVideoGestureSector(up, left, dp(38));
-                        }
-                        if (videoGestureSector == VIDEO_GESTURE_FLIP_LOCK) {
-                            if (recordAudioVideoRunnableStarted) {
-                                startAndLockEarlyVideoGesture(true);
-                                return true;
-                            } else if (recordingAudioVideo && left >= dp(57)) {
-                                if (startTranslation == -1) recordCircle.setLockTranslationVisual(0f);
-                                completeDiagonalGesture(false);
-                                return true;
-                            }
-                        }
-                        if (recordAudioVideoRunnableStarted
-                                && videoGestureSector == VIDEO_GESTURE_CANCEL) {
-                            AndroidUtilities.cancelRunOnUIThread(recordAudioVideoRunnable);
-                            recordAudioVideoRunnableStarted = false;
-                            return true;
-                        }
-                        // Preserve the normal tap/hold boundary despite the extra
-                        // camera-selection window. A released hold is not a mode tap.
-                        if (recordAudioVideoRunnableStarted
-                                && motionEvent.getEventTime() - recordTouchDownTime >= RECORD_HOLD_DELAY_MS) {
-                            AndroidUtilities.cancelRunOnUIThread(recordAudioVideoRunnable);
-                            recordAudioVideoRunnable.run();
-                        }
-                    }
                     if (motionEvent.getAction() == MotionEvent.ACTION_CANCEL && recordingAudioVideo) {
                         if (slideToCancelProgress < 0.7f) {
                             if (hasRecordVideo && isInVideoMode()) {
@@ -3329,8 +3078,6 @@ public class ChatActivityEnterView extends FrameLayout implements
                             millisecondsRecorded = 0;
                             recordingAudioVideo = false;
                             updateRecordInterface(RECORD_STATE_CANCEL_BY_GESTURE, true);
-                        } else if (videoGestureSector == VIDEO_GESTURE_FLIP_LOCK) {
-                            completeDiagonalGesture(false);
                         } else {
                             sendButtonVisible = true;
                             startLockTransition();
@@ -3418,73 +3165,13 @@ public class ChatActivityEnterView extends FrameLayout implements
                         }
                     }
                     return true;
-                } else if (motionEvent.getAction() == MotionEvent.ACTION_MOVE) {
-                    if (diagonalGestureCompleting || diagonalGestureAnimator != null || diagonalGestureCommitted) {
-                        return true;
-                    }
+                } else if (motionEvent.getAction() == MotionEvent.ACTION_MOVE && recordingAudioVideo) {
                     float x = motionEvent.getX();
                     float y = motionEvent.getY();
-                    final float upFromDown = recordTouchDownY - motionEvent.getRawY();
-                    final float leftFromDown = recordTouchDownX - motionEvent.getRawX();
-                    if (hasRecordVideo && isInVideoMode() && videoGestureSector == VIDEO_GESTURE_NONE) {
-                        // Wait for a deliberate movement before committing to a direction. This
-                        // prevents small finger jitter near the origin from choosing another sector.
-                        videoGestureSector = recordAudioVideoRunnableStarted
-                                ? getPendingVideoGestureSector(upFromDown, leftFromDown)
-                                : getVideoGestureSector(upFromDown, leftFromDown, dp(38));
-                    }
-                    if (recordAudioVideoRunnableStarted && hasRecordVideo && isInVideoMode()) {
-                        int earlySector = videoGestureSector;
-                        if (earlySector != VIDEO_GESTURE_NONE) {
-                            earlyVideoGestureConsumed = true;
-                            if (earlySector == VIDEO_GESTURE_CANCEL) {
-                                AndroidUtilities.cancelRunOnUIThread(recordAudioVideoRunnable);
-                                recordAudioVideoRunnableStarted = false;
-                            } else {
-                                startAndLockEarlyVideoGesture(earlySector == VIDEO_GESTURE_FLIP_LOCK);
-                            }
-                            return true;
-                        }
-                    }
-                    if (!recordingAudioVideo) return true;
-                    float lockTouchY = y;
                     if (recordCircle.isSendButtonVisible()) {
                         return false;
                     }
-                    if (hasRecordVideo && isInVideoMode()) {
-                        final float up = upFromDown;
-                        final float left = leftFromDown;
-                        if (startTranslation == -1) recordCircle.setLockTranslationVisual(0);
-                        lockTouchY = startTranslation;
-                        final boolean diagonal = videoGestureSector == VIDEO_GESTURE_FLIP_LOCK;
-                        if (videoGestureSector == VIDEO_GESTURE_LOCK) {
-                            lockTouchY = startTranslation - Math.max(0f, up);
-                        }
-                        // The camera hint is the master; the lock only mirrors its exact progress.
-                        final float diagonalProgress = diagonal
-                                ? Math.min(1f, Math.max(0f, left) / dp(57))
-                                : 0f;
-                        if (diagonal) {
-                            setSlideToCancelProgress(1f);
-                            if (slideText != null) slideText.setSlideX(1f);
-                            if (diagonalProgress >= 1f) {
-                                completeDiagonalGesture(false);
-                                return true;
-                            }
-                            setDiagonalGestureProgress(diagonalProgress);
-                            recordCircle.setMovingCords(x, y);
-                            return true;
-                        }
-                        if (videoGestureSector == VIDEO_GESTURE_CANCEL) {
-                            // A horizontal cancel must not pull the lock upward.
-                            lockTouchY = startTranslation;
-                        } else if (videoGestureSector == VIDEO_GESTURE_NONE) {
-                            // Keep both hints still while the direction is not yet intentional.
-                            recordCircle.setMovingCords(x, y);
-                            return true;
-                        }
-                    }
-                    if (recordCircle.setLockTranslation(lockTouchY) == 2) {
+                    if (recordCircle.setLockTranslation(y) == 2) {
                         startLockTransition();
                         return false;
                     } else {

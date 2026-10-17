@@ -114,12 +114,6 @@ public abstract class InstantCameraViewBase extends FrameLayout {
     /** Switches between recording and recorded-video preview. */
     public abstract void togglePause();
 
-    /** Uses the same guarded camera flip as the on-screen camera control. */
-    public abstract void flipCamera();
-
-    /** Selects the opposite camera before the next recording session is created. */
-    public abstract void flipCameraOnNextStart();
-
     /** Returns whether recording is paused or changing pause state. */
     public abstract boolean isPaused();
 
