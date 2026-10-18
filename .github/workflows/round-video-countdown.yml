@@ -1,4 +1,4 @@
-name: Round video countdown regression
+name: Round video regression
 
 on:
   push:
@@ -22,3 +22,7 @@ jobs:
         run: |
           javac -d build/countdown-test TMessagesProj/src/main/java/org/telegram/ui/Components/RoundVideoRecordingCountdown.java Tools/countdown/RoundVideoRecordingCountdownTest.java
           java -cp build/countdown-test org.telegram.ui.Components.RoundVideoRecordingCountdownTest
+      - name: Check independent edited ranges and sent-file identities
+        run: |
+          javac -d build/countdown-test TMessagesProj/src/main/java/org/telegram/messenger/RoundVideoSegmentRange.java TMessagesProj/src/main/java/org/telegram/messenger/RoundVideoSendIdentity.java Tools/countdown/RoundVideoSendTest.java
+          java -cp build/countdown-test org.telegram.messenger.RoundVideoSendTest

@@ -5,9 +5,15 @@
 - Upstream: [DrKLO/Telegram](https://github.com/DrKLO/Telegram).
 - Exact base: [`f32ffeec763f0bdbf4bec25b52d654f77bff733d`](https://github.com/DrKLO/Telegram/commit/f32ffeec763f0bdbf4bec25b52d654f77bff733d), Android 13.0.2 / 7175.
 - Fork: [RevitBlessed/Telegram](https://github.com/RevitBlessed/Telegram).
-- Branch: `contest/round-video-upgrades`; release: `round-video-v1.0`.
+- Branch: `contest/round-video-upgrades`; latest release: `round-video-v1.0.1`.
 
-The submission commit directly descends from the upstream base and contains the final implementation, not intermediate experiments. The older `RevitBlessed/tg_circle` repository is retained for development history.
+The initial submission commit directly descends from the upstream base; subsequent commits contain documented fixes. The older `RevitBlessed/tg_circle` repository is retained for development history.
+
+### v1.0.1 — edited circles sent as duplicate videos
+
+The real sending path previously excluded round-video trim ranges from its sent-file cache key. Batch circles share one source MP4, so a later range could reuse an earlier uploaded document. `RoundVideoSendIdentity` now includes absolute start/end, duration, audio mode and output dimensions, with a new namespace that does not match old file-only cache entries.
+
+`RoundVideoSegmentRange` clamps per-item editor trims and creates immutable source-microsecond ranges. Send snapshots are created before stack-selection animations; relative editor milliseconds are never converted in place. Regression tests cover two edited circles of equal length, re-editing, retry identity, short tails, deleted-item offsets and resumed ranges.
 
 ## 1. One-finger camera flip and recording lock
 
@@ -55,6 +61,7 @@ Java paths below are relative to `TMessagesProj/src/main/java/org/telegram/`.
 | Chat integration and transitions | `ui/ChatActivity.java` |
 | Segment timeline | `ui/Components/VideoTimelineView.java` |
 | Haptics | `ui/Components/RoundVideoRecordingCountdown.java`, `RoundVideoRecordingFeedback.java` |
+| Independent outgoing ranges and sent-file identity | `messenger/RoundVideoSegmentRange.java`, `RoundVideoSendIdentity.java`, `SendMessagesHelper.java` |
 | Debug-only local-chat entry | `ui/LoginActivity.java` |
 
 ## Integration
@@ -65,7 +72,7 @@ git diff --stat f32ffeec763f0bdbf4bec25b52d654f77bff733d FETCH_HEAD
 git log --oneline f32ffeec763f0bdbf4bec25b52d654f77bff733d..FETCH_HEAD
 ```
 
-The single submission commit can be cherry-picked onto the pinned base. On a newer revision, review/resolve recorder and chat conflicts before building. Do not copy only the gesture or stack UI: session, timeline and delegate changes are also required.
+The submission commits can be cherry-picked in order onto the pinned base. On a newer revision, review/resolve recorder and chat conflicts before building. Do not copy only the gesture or stack UI: session, timeline, sending-cache and delegate changes are also required.
 
 `ChatActivity.isMultiSegmentRoundVideoEnabled()` enables the feature; its recorder uses `InstantCameraView2`. There are no new third-party runtime dependencies or changes to protocol, native source, submodule pointers, app credentials or signing keys.
 

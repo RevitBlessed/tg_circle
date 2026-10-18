@@ -1,12 +1,18 @@
 # Verification and reviewer checklist
 
+## v1.0.1 fix verification
+
+The owner subsequently reported that two individually edited batch circles could arrive as identical videos. Source inspection found that `prepareSendingVideo` omitted round-video edits from the sent-file identity. The new regression test simulates a completed first upload followed by a cache lookup for the second edited range: it must not reuse that document. Identical retries still share their own identity; different trims, audio modes and source offsets do not.
+
+The range/identity and countdown JVM tests pass locally. These tests exercise production calculation helpers; they do not substitute for end-to-end delivery on a real account. The new APK needs confirmation on the reported two-edited-video scenario. Earlier acceptance of v1.0 is not claimed as acceptance of this fix.
+
 ## Evidence
 
 - The project owner explicitly accepted the latest APK after the pause/resume fix.
 - `:TMessagesProj_App:assembleAfatDebug` succeeded using the local native-library reuse route described in [BUILD.md](BUILD.md).
 - APK signature verification and update installation on the emulator succeeded.
 - The Android-independent countdown regression test is included and exercised separately.
-- Publishing preparation does not modify the accepted Java implementation.
+- Initial publishing preserved the accepted Java implementation; v1.0.1 includes the documented send-cache/range fix.
 
 This is not exhaustive QA. Clean full-native builds, all variants, low-end performance, physical haptics and all network delivery cases are not certified here. The last automated emulator pass stopped at login, so authenticated recording was not exercised in that pass. The owner's subsequent acceptance is separate from automated testing.
 

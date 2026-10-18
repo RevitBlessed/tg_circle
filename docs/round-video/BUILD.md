@@ -33,7 +33,11 @@ Output: `TMessagesProj_App/build/outputs/apk/afat/debug/app.apk`.
 
 Inherited Gradle settings allow an 8 GB heap. On low-memory machines, close emulators and select an appropriate local heap override. Do not commit machine paths or credentials. A clean native build is much heavier than an incremental Java build.
 
-## Supplied APK provenance
+## Latest APK
+
+[v1.0.1 release](https://github.com/RevitBlessed/Telegram/releases/tag/round-video-v1.0.1) fixes edited batch circles reusing an earlier sent document. Its release assets include the new APK and its SHA-256 file. Build variant and local native-library reuse are the same as described below; this is a new build, not the v1.0 binary.
+
+## Historical v1.0 APK provenance
 
 [Release asset](https://github.com/RevitBlessed/Telegram/releases/tag/round-video-v1.0): `Telegram-Round-Video-Contest.apk`.
 
@@ -57,3 +61,12 @@ java -cp build/countdown-test org.telegram.ui.Components.RoundVideoRecordingCoun
 ```
 
 Both commands must exit successfully; explicit assertions do not require `-ea`. The GitHub workflow runs this test, not a full Android build/device test.
+
+## Edited-circle regression test (JDK only)
+
+```sh
+javac -d build/countdown-test TMessagesProj/src/main/java/org/telegram/messenger/RoundVideoSegmentRange.java TMessagesProj/src/main/java/org/telegram/messenger/RoundVideoSendIdentity.java Tools/countdown/RoundVideoSendTest.java
+java -cp build/countdown-test org.telegram.messenger.RoundVideoSendTest
+```
+
+The workflow runs both regression suites. The send test checks range offsets, trimming, equal-duration clips and sent-file identity reuse without requiring Android or sending any messages.

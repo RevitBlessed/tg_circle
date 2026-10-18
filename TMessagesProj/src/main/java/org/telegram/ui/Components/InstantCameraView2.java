@@ -42,6 +42,7 @@ import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.MediaController;
 import org.telegram.messenger.NotificationCenter;
 import org.telegram.messenger.R;
+import org.telegram.messenger.RoundVideoSegmentRange;
 import org.telegram.utils.settings.SharedSettings;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
@@ -1794,15 +1795,12 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
             return;
         }
         BatchSegment segment = batchSegments.get(selectedBatchSegment);
-        long start = Math.max(0L, videoEditedInfo.startTime);
-        long end = videoEditedInfo.endTime < 0
-                ? segment.durationMs
-                : Math.min(segment.durationMs, videoEditedInfo.endTime);
-        if (end - start < MINIMUM_DURATION_MS) {
-            end = Math.min(segment.durationMs, start + MINIMUM_DURATION_MS);
-        }
-        segment.trimStartMs = start;
-        segment.trimEndMs = Math.max(start, end);
+        RoundVideoSegmentRange range =
+                RoundVideoSegmentRange.resolve(segment.sourceStartMs,
+                        segment.durationMs, videoEditedInfo.startTime, videoEditedInfo.endTime,
+                        MINIMUM_DURATION_MS);
+        segment.trimStartMs = range.trimStartMs;
+        segment.trimEndMs = range.trimEndMs;
     }
 
     private VideoEditedInfo createBatchVideoEditedInfo(
@@ -1828,10 +1826,20 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
         info.resultWidth = info.originalWidth = outputSize;
         info.resultHeight = info.originalHeight = outputSize;
         info.originalPath = segment.file == null ? null : segment.file.getAbsolutePath();
+        info.originalDuration = sourceDurationMs * 1000L;
         info.muted = !segment.hasAudio;
         if (absoluteSourceRange) {
-            info.startTime = segment.sourceStartMs + segment.trimStartMs;
-            info.endTime = segment.sourceStartMs + segment.trimEndMs;
+            RoundVideoSegmentRange range =
+                    RoundVideoSegmentRange.resolve(segment.sourceStartMs,
+                            segment.durationMs, segment.trimStartMs, segment.trimEndMs,
+                            MINIMUM_DURATION_MS);
+            // The send/conversion API uses source microseconds; the editor uses local ms.
+            // Make a fresh, final snapshot here before any send animation changes selection.
+            info.startTime = range.startTimeUs;
+            info.endTime = range.endTimeUs;
+            info.estimatedDuration = range.durationMs;
+            info.estimatedSize = Math.max(1L, (long) (info.estimatedSize
+                    * (range.durationMs / (double) segment.durationMs)));
         } else {
             if (segment.trimStartMs > 0L) {
                 info.startTime = segment.trimStartMs;
@@ -1864,17 +1872,6 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
         for (int i = 0; i < segments.size(); i++) {
             BatchSegment segment = segments.get(i);
             VideoEditedInfo info = createBatchVideoEditedInfo(segment, true);
-            long trimStart = Math.max(0L, segment.trimStartMs);
-            long trimEnd = Math.min(segment.durationMs, segment.trimEndMs);
-            long fullDuration = Math.max(1L, segment.durationMs);
-            info.estimatedDuration = Math.max(1L, trimEnd - trimStart);
-            info.estimatedSize = Math.max(
-                    1L,
-                    (long) (info.estimatedSize
-                            * (info.estimatedDuration / (double) fullDuration))
-            );
-            if (info.startTime >= 0L) info.startTime *= 1000L;
-            if (info.endTime >= 0L) info.endTime *= 1000L;
             MediaController.PhotoEntry entry = new MediaController.PhotoEntry(
                     0,
                     0,

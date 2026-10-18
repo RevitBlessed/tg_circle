@@ -12049,7 +12049,14 @@ public class SendMessagesHelper extends BaseController implements NotificationCe
 
                 originalPath += temp.length() + "_" + temp.lastModified();
                 if (videoEditedInfo != null) {
-                    if (!isRound) {
+                    if (isRound) {
+                        // Several round messages can now share the same source MP4.
+                        // A file-only key would reuse the first sent clip for later ranges.
+                        originalPath = RoundVideoSendIdentity.appendTo(originalPath,
+                                videoEditedInfo.startTime, videoEditedInfo.endTime,
+                                videoEditedInfo.estimatedDuration, videoEditedInfo.muted,
+                                videoEditedInfo.resultWidth, videoEditedInfo.resultHeight);
+                    } else {
                         originalPath += videoEditedInfo.estimatedDuration + "_" + videoEditedInfo.startTime + "_" + videoEditedInfo.endTime + (videoEditedInfo.muted ? "_m" : "");
                         if (videoEditedInfo.resultWidth != videoEditedInfo.originalWidth) {
                             originalPath += "_" + videoEditedInfo.resultWidth;
