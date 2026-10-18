@@ -35,7 +35,7 @@ Inherited Gradle settings allow an 8 GB heap. On low-memory machines, close emul
 
 ## Latest APK
 
-[v1.0.2 release](https://github.com/RevitBlessed/Telegram/releases/tag/round-video-v1.0.2) exports every final edited range to a separate MP4 before Telegram's send pipeline receives it. The duration sent in message metadata is read from the exported file. Its release assets include the new APK and its SHA-256 file. Build variant and local native-library reuse are the same as described below; this is a new build, not the v1.0 or v1.0.1 binary.
+[v1.0.2 source tag](https://github.com/RevitBlessed/Telegram/tree/round-video-v1.0.2) exports every final edited range to a separate MP4 before Telegram's send pipeline receives it. The duration sent in message metadata is read from the exported file. A locally verified reference APK was produced from this source with the SHA-256 below; use the full source-build instructions above when independently evaluating the submission. Build variant and local native-library reuse are the same as described below; this is a new build, not the v1.0 or v1.0.1 binary.
 
 SHA-256:
 
