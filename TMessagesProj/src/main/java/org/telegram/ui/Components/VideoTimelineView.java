@@ -39,6 +39,7 @@ import java.util.ArrayList;
 public class VideoTimelineView extends View {
 
     private long videoLength;
+    private long sourceStartMs;
     private float progressLeft;
     private float progressRight = 1;
     private final Paint paint2 = new Paint();
@@ -257,6 +258,10 @@ public class VideoTimelineView extends View {
     }
 
     public void setVideoPath(String path) {
+        setVideoPath(path, 0L, Long.MAX_VALUE);
+    }
+
+    public void setVideoPath(String path, long startMs, long endMs) {
         destroy(false);
         mediaMetadataRetriever = new MediaMetadataRetriever();
         progressLeft = 0.0f;
@@ -264,7 +269,9 @@ public class VideoTimelineView extends View {
         try {
             mediaMetadataRetriever.setDataSource(path);
             String duration = mediaMetadataRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
-            videoLength = Long.parseLong(duration);
+            long sourceDurationMs = Long.parseLong(duration);
+            sourceStartMs = Math.max(0L, Math.min(startMs, sourceDurationMs));
+            videoLength = Math.max(1L, Math.min(endMs, sourceDurationMs) - sourceStartMs);
         } catch (Exception e) {
             FileLog.e(e);
         }
@@ -313,7 +320,7 @@ public class VideoTimelineView extends View {
                     return null;
                 }
                 try {
-                    bitmap = mediaMetadataRetriever.getFrameAtTime(frameTimeOffset * frameNum * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                    bitmap = mediaMetadataRetriever.getFrameAtTime((sourceStartMs + frameTimeOffset * frameNum) * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
                     if (isCancelled()) {
                         return null;
                     }

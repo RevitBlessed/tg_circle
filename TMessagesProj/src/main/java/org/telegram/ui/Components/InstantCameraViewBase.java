@@ -38,17 +38,6 @@ public abstract class InstantCameraViewBase extends FrameLayout {
     private TrimCallback trimCallback;
     private RecordingUiFrameCallback recordingUiFrameCallback;
     private boolean recordingUiFrameClockActive;
-    private boolean startWithRearCamera;
-
-    public final void setStartWithRearCamera(boolean rearCamera) {
-        startWithRearCamera = rearCamera;
-    }
-
-    protected final boolean consumeRearCameraStart() {
-        boolean rearCamera = startWithRearCamera;
-        startWithRearCamera = false;
-        return rearCamera;
-    }
 
     protected InstantCameraViewBase(Context context) {
         super(context);
@@ -125,6 +114,12 @@ public abstract class InstantCameraViewBase extends FrameLayout {
     /** Switches between recording and recorded-video preview. */
     public abstract void togglePause();
 
+    /** Uses the same guarded camera flip as the on-screen camera control. */
+    public abstract void flipCamera();
+
+    /** Selects the opposite camera before the next recording session is created. */
+    public abstract void flipCameraOnNextStart();
+
     /** Returns whether recording is paused or changing pause state. */
     public abstract boolean isPaused();
 
@@ -153,6 +148,15 @@ public abstract class InstantCameraViewBase extends FrameLayout {
 
     /** Cancels the active recording. */
     public abstract void cancel(boolean byGesture);
+
+    /** Removes the selected item from a multi-round review, when available. */
+    public boolean deleteSelectedBatchSegment() {
+        return false;
+    }
+
+    public boolean canResumeBatchRecording() {
+        return false;
+    }
 
     /** Returns the camera controls container. */
     public abstract View getButtonsLayout();

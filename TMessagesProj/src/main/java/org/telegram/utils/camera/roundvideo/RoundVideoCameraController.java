@@ -130,6 +130,7 @@ final class RoundVideoCameraController {
     private static final int TORCH_VERIFICATION_RETRY_FRAME = 3;
     private static final int TORCH_VERIFICATION_FAILURE_FRAME = 6;
     private static final long COMMON_START_TIMEOUT_MS = 3_000L;
+    private static final int GESTURE_START_STABLE_FRAME_COUNT = 3;
 
     private final Context context;
     private final CameraManager cameraManager;
@@ -140,6 +141,7 @@ final class RoundVideoCameraController {
     private final RoundVideoSession.CameraResolution requestedCameraResolution;
     private final RoundVideoSession.FrameRate requestedFrameRate;
     private final boolean compositionEnabled;
+    private final int initialFrameCountBeforeRecording;
     private final RoundVideoDiagnostics diagnostics;
     private final Callback callback;
     private final Rect zoomCropRect = new Rect();
@@ -269,6 +271,7 @@ final class RoundVideoCameraController {
             @NonNull RoundVideoSession.CameraResolution cameraResolution,
             @NonNull RoundVideoSession.FrameRate frameRate,
             boolean compositionEnabled,
+            boolean warmCameraPreloadEnabled,
             @NonNull RoundVideoDiagnostics diagnostics,
             @NonNull Callback callback
     ) {
@@ -281,8 +284,15 @@ final class RoundVideoCameraController {
         this.requestedCameraResolution = cameraResolution;
         this.requestedFrameRate = frameRate;
         this.compositionEnabled = compositionEnabled;
+        warmSwitchDisabled = !warmCameraPreloadEnabled;
+        initialFrameCountBeforeRecording = warmCameraPreloadEnabled
+                ? 1
+                : GESTURE_START_STABLE_FRAME_COUNT;
         this.diagnostics = diagnostics;
         this.callback = callback;
+        if (!warmCameraPreloadEnabled) {
+            diagnostics.log("camera warm preload disabled for gesture-selected initial facing");
+        }
         previewView.addOnLayoutChangeListener(layoutChangeListener);
     }
 
@@ -586,7 +596,7 @@ final class RoundVideoCameraController {
         glProcessor.setFirstFrameListener(() -> {
             Handler handler = cameraHandler;
             if (handler != null) handler.post(this::startRecordingAfterFirstFrame);
-        });
+        }, initialFrameCountBeforeRecording);
         recordingSurface = glProcessor.start();
         if (dualActiveMode) {
             CameraSelection secondarySelection = selectionForFacing(

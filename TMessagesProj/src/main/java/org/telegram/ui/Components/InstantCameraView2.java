@@ -67,7 +67,7 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
     private static final int SWITCH_PREVIEW_BITMAP_SIZE = 180;
     private static final long UI_FRAME_FALLBACK_DELAY_NS = 70_000_000L;
     private static final long CAMERA_FLIP_MINIMUM_DURATION_MS = 580L;
-    private static final long BATCH_DEMO_SEGMENT_DURATION_MS = 8_000L;
+    private static final long BATCH_DEMO_SEGMENT_DURATION_MS = 60_000L;
     private static final int MAX_BATCH_SEGMENTS = 5;
     private static final float BATCH_STACK_IDLE_ALPHA = 0.55f;
     private static final int BATCH_STACK_THUMBNAIL_SIZE_DP = 72;
@@ -135,6 +135,8 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
     private boolean drawInitialPlaceholder;
     private boolean switchPlaceholderVisible;
     private boolean cameraFlipInProgress;
+    private boolean initialCameraFlipPending;
+    private boolean cameraOpenAnimationFinished;
     private boolean cameraFlipSessionReady;
     private boolean cameraFlipFirstFrameReady;
     private boolean cameraFlipAnimationCompleted;
@@ -143,8 +145,6 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
     private Bitmap lastBitmap;
     private long lastVisibleDurationMs;
     private float panTranslationY;
-    private boolean rearCameraStartOverride;
-    private RoundVideoSession.CameraFacing cameraBeforeRearGesture;
     private float animationTranslationY;
     private float pinchStartDistance;
     private float zoomProgress;
@@ -163,6 +163,12 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
     private Bitmap pendingBatchThumbnail;
     private View pendingBatchHolder;
     private boolean batchReviewVisible;
+    // A paused preview still owns a resumable recorder. Its final, partial
+    // item is in the stack only while reviewing, not in the completed prefix.
+    private boolean batchPausedReview;
+    private BatchSegment pausedBatchTail;
+    private long currentBatchSourceStartMs;
+    private long currentBatchTrimStartMs;
     private boolean batchSending;
     private boolean batchSendPreviewFrozen;
     private boolean batchStackCenterFrozen;
@@ -484,7 +490,7 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
 
     @Override
     public void destroy(boolean async) {
-        rearCameraStartOverride = false;
+        initialCameraFlipPending = false;
         setRecordingUiFrameClockActive(false);
         cancelCameraFlipAnimation();
         if (zoomResetAnimator != null) zoomResetAnimator.cancel();
@@ -504,14 +510,14 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
 
     @Override
     public void togglePause() {
+        if (batchPausedReview) {
+            resumePausedBatch();
+            return;
+        }
         if (batchReviewVisible) return;
         if (session == null || stateInfo == null) return;
         if (stateInfo.getState() == RoundVideoSession.State.RECORDING) {
-            if (multiSegmentEnabled && !batchSegments.isEmpty()) {
-                finishContinuousBatch(BATCH_ACTION_REVIEW, null);
-            } else {
-                pauseForPreview();
-            }
+            pauseForPreview();
         } else if (stateInfo.getState() == RoundVideoSession.State.PREVIEWING) {
             videoEditedInfo = null;
             resumeNotificationPending = true;
@@ -532,6 +538,8 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
     @Override
     public void showCamera(boolean fromPaused) {
         if (session != null) return;
+        initialCameraFlipPending = !fromPaused && flipCameraOnNextStart;
+        cameraOpenAnimationFinished = false;
         setVisibilityFromPause = fromPaused;
         setVisibility(VISIBLE);
         if (!fromPaused) {
@@ -564,14 +572,16 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
             upload = new TelegramRoundVideoUpload(currentAccount, secretChat);
         }
         activeOutputResolution = SharedSettings.roundVideoOutputResolution.get();
-        boolean rearCameraStart = consumeRearCameraStart();
-        if (rearCameraStart) {
-            rearCameraStartOverride = true;
-            cameraBeforeRearGesture = SharedSettings.roundVideoLastCamera.get();
+        // A new, independent round-video recording always starts from the
+        // stock front camera. Camera facing is retained only while this same
+        // session is paused/resumed or split into consecutive batch segments.
+        RoundVideoSession.CameraFacing initialFacing = RoundVideoSession.CameraFacing.FRONT;
+        if (flipCameraOnNextStart) {
+            initialFacing = initialFacing == RoundVideoSession.CameraFacing.FRONT
+                    ? RoundVideoSession.CameraFacing.BACK
+                    : RoundVideoSession.CameraFacing.FRONT;
+            flipCameraOnNextStart = false;
         }
-        RoundVideoSession.CameraFacing initialFacing = rearCameraStart
-                ? RoundVideoSession.CameraFacing.BACK
-                : SharedSettings.roundVideoLastCamera.get();
         session = new RoundVideoSession.Builder(getContext(), textureView)
                 .setOutputDirectory(new File(ApplicationLoader.getFilesDirFixed(), "cache"))
                 .setInitialFacing(initialFacing)
@@ -585,6 +595,7 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
                                 : 60_000L
                 )
                 .setCompositionEnabled(SharedSettings.roundVideoComposition.get())
+                .setWarmCameraPreloadEnabled(!initialCameraFlipPending)
                 .setListener(sessionListener)
                 .setOutputListener(multiSegmentEnabled ? batchOutputListener : upload)
                 .setScreenFlashController(this::setScreenFlashEnabled)
@@ -594,6 +605,10 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
 
     @Override
     public void startAnimation(boolean open, boolean fromPaused) {
+        if (!open) {
+            initialCameraFlipPending = false;
+            cancelCameraFlipAnimation();
+        }
         dispatchAnimationState(open, fromPaused);
         if (visibilityAnimator != null) {
             visibilityAnimator.removeAllListeners();
@@ -647,6 +662,14 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
             });
         } else {
             setTranslationX(0f);
+            visibilityAnimator.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    if (animation != visibilityAnimator) return;
+                    cameraOpenAnimationFinished = true;
+                    maybeAnimateInitialCameraFlip();
+                }
+            });
         }
         visibilityAnimator.start();
     }
@@ -673,6 +696,17 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
     @Override
     public void changeVideoPreviewState(int state, float progress) {
         if (batchSending) return;
+        if (batchPausedReview && session != null && selectedBatchSegment >= 0) {
+            persistSelectedBatchTrim();
+            BatchSegment segment = batchSegments.get(selectedBatchSegment);
+            session.setTrimRange(segment.sourceStartMs + segment.trimStartMs,
+                    segment.sourceStartMs + segment.trimEndMs);
+            if (state == 0) session.playPreview();
+            else if (state == 1) session.pausePreview();
+            else if (state == 2) session.seekPreview(segment.sourceStartMs
+                    + (long) (progress * segment.durationMs));
+            return;
+        }
         if (batchReviewVisible && batchVideoPlayer != null) {
             persistSelectedBatchTrim();
             if (state == 0) {
@@ -719,17 +753,25 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
                 effectId,
                 stars
         );
+        if (batchPausedReview) {
+            if (state == 1 || state == 4) {
+                persistSelectedBatchTrim();
+                pendingBatchAction = BATCH_ACTION_SEND;
+                pendingBatchSend = options;
+                // Preview selection must never trim the other stack entries
+                // out of the continuous source when committing the batch.
+                session.setTrimRange(0, stateInfo.getRecordedDurationMs());
+                session.finish(true);
+            }
+            return;
+        }
         if (multiSegmentEnabled && batchReviewVisible) {
             sendBatch(options);
             return;
         }
         if (session == null || stateInfo == null) return;
         if (state == 3) {
-            if (multiSegmentEnabled && !batchSegments.isEmpty()) {
-                finishContinuousBatch(BATCH_ACTION_REVIEW, null);
-            } else {
-                pauseForPreview();
-            }
+            pauseForPreview();
             return;
         }
         if (state != 1 && state != 4) return;
@@ -769,6 +811,11 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
         if (batchSending) return;
         if (multiSegmentEnabled && batchReviewVisible) {
             postRecordStopped(byGesture ? 0 : 6);
+            if (batchPausedReview && session != null) {
+                session.cancel();
+                session = null;
+                stateInfo = null;
+            }
             clearBatchSegments(true);
             MediaController.getInstance().requestRecordAudioFocus(false);
             startAnimation(false, false);
@@ -781,6 +828,51 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
         upload = null;
         MediaController.getInstance().requestRecordAudioFocus(false);
         startAnimation(false, false);
+    }
+
+    @Override
+    public boolean deleteSelectedBatchSegment() {
+        if (!multiSegmentEnabled || batchSending || !batchReviewVisible
+                || batchSegments.size() <= 1
+                || selectedBatchSegment < 0
+                || selectedBatchSegment >= batchSegments.size()) {
+            return false;
+        }
+        persistSelectedBatchTrim();
+        int removedIndex = selectedBatchSegment;
+        BatchSegment removed = batchSegments.remove(removedIndex);
+        if (removed == pausedBatchTail) pausedBatchTail = null;
+        View holder = findBatchThumbnail(removedIndex);
+        if (holder != null) {
+            holder.animate().cancel();
+            batchStackLayout.removeView(holder);
+        }
+        if (removed.thumbnail != null && !removed.thumbnail.isRecycled()) {
+            removed.thumbnail.recycle();
+        }
+        for (int i = 0; i < batchStackLayout.getChildCount(); i++) {
+            View child = batchStackLayout.getChildAt(i);
+            if (child.getTag() instanceof Integer) {
+                int oldIndex = (Integer) child.getTag();
+                if (oldIndex > removedIndex) {
+                    bindBatchThumbnail(child, oldIndex - 1);
+                    FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) child.getLayoutParams();
+                    params.leftMargin = (oldIndex - 1) * dp(BATCH_STACK_THUMBNAIL_STEP_DP);
+                    child.setLayoutParams(params);
+                }
+            }
+        }
+        selectedBatchSegment = -1;
+        showBatchPreview(Math.min(removedIndex, batchSegments.size() - 1));
+        updateBatchStackCenter(false);
+        return true;
+    }
+
+    @Override
+    public boolean canResumeBatchRecording() {
+        return batchPausedReview && pendingBatchAction == BATCH_ACTION_NONE
+                && session != null && stateInfo != null
+                && stateInfo.getState() == RoundVideoSession.State.PREVIEWING;
     }
 
     @Override
@@ -800,6 +892,7 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
 
     @Override
     public void hideCamera(boolean async) {
+        pendingGestureCameraFlip = false;
         destroy(async);
         cameraContainer.setTranslationX(0f);
         animationTranslationY = 0f;
@@ -899,13 +992,12 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
         lastVisibleDurationMs = duration;
         if (multiSegmentEnabled) {
             while (batchSegments.size() < MAX_BATCH_SEGMENTS - 1) {
-                long nextBoundaryMs = (batchSegments.size() + 1L)
-                        * BATCH_DEMO_SEGMENT_DURATION_MS;
+                long nextBoundaryMs = currentBatchSourceStartMs + BATCH_DEMO_SEGMENT_DURATION_MS;
                 if (duration < nextBoundaryMs) break;
                 captureContinuousBoundary(nextBoundaryMs);
             }
             long currentSegmentDurationMs = duration
-                    - batchSegments.size() * BATCH_DEMO_SEGMENT_DURATION_MS;
+                    - currentBatchSourceStartMs;
             currentSegmentDurationMs = Math.max(0L, Math.min(
                     BATCH_DEMO_SEGMENT_DURATION_MS,
                     currentSegmentDurationMs
@@ -917,7 +1009,7 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
             // Finish directly from RECORDING at the fifth boundary. Letting the
             // session's own limit pause first creates a full preview snapshot and
             // then finalizes the same 40-second file again before our editor opens.
-            if (duration >= BATCH_MAXIMUM_DURATION_MS
+            if (duration >= getBatchMaximumDurationMs()
                     && pendingBatchAction == BATCH_ACTION_NONE) {
                 finishContinuousBatch(BATCH_ACTION_REVIEW, null);
             }
@@ -929,7 +1021,7 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
 
     private void captureContinuousBoundary(long endMs) {
         int index = batchSegments.size();
-        long startMs = index * BATCH_DEMO_SEGMENT_DURATION_MS;
+        long startMs = currentBatchSourceStartMs;
         Bitmap thumbnail = prepareBatchThumbnail(textureView.getBitmap());
         BatchSegment segment = new BatchSegment(
                 null,
@@ -941,6 +1033,9 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
                 thumbnail
         );
         batchSegments.add(segment);
+        segment.trimStartMs = currentBatchTrimStartMs;
+        currentBatchSourceStartMs = endMs;
+        currentBatchTrimStartMs = 0L;
         updateBatchSelectionVisual(index, true);
         addBatchThumbnail(thumbnail, index, true);
     }
@@ -991,6 +1086,7 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
             if (info.getState() == RoundVideoSession.State.COMPLETED
                     || info.getState() == RoundVideoSession.State.ERROR
                     || info.getState() == RoundVideoSession.State.RELEASED) {
+                pendingGestureCameraFlip = false;
                 cancelCameraFlipAnimation();
                 startHeavyOperations();
             }
@@ -1003,6 +1099,7 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
                 }
             }
             updateButtons();
+            applyPendingGestureCameraFlip();
         }
 
         @Override
@@ -1010,10 +1107,8 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
                 @NonNull RoundVideoSession.CameraCapabilities cameraCapabilities
         ) {
             capabilities = cameraCapabilities;
-            if (cameraCapabilities.getActiveFacing() != null && !rearCameraStartOverride) {
-                SharedSettings.roundVideoLastCamera.set(cameraCapabilities.getActiveFacing());
-            }
             updateButtons();
+            applyPendingGestureCameraFlip();
         }
 
         @Override
@@ -1057,6 +1152,10 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
             muteImageView.setAlpha(0f);
             File previewFile = session == null ? null : session.getPreviewFile();
             if (previewFile == null) return;
+            if (multiSegmentEnabled) {
+                showPausedBatch(durationMs, previewFile);
+                return;
+            }
             videoEditedInfo = createVideoEditedInfo(previewFile, durationMs, null);
             videoEditedInfo.startTime = trimStartMs > 0 ? trimStartMs : -1;
             videoEditedInfo.endTime = trimEndMs < durationMs ? trimEndMs : -1;
@@ -1127,8 +1226,81 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
                 || stateInfo.getState() != RoundVideoSession.State.RECORDING) {
             return;
         }
+        if (multiSegmentEnabled) {
+            updateRecordingUiFrame();
+            if (stateInfo.getState() != RoundVideoSession.State.RECORDING) return;
+            pendingBatchThumbnail = prepareBatchThumbnail(textureView.getBitmap());
+        }
         postRecordStopped(2);
         session.pauseRecording();
+    }
+
+    private long getBatchMaximumDurationMs() {
+        return currentBatchSourceStartMs
+                + (MAX_BATCH_SEGMENTS - batchSegments.size()) * BATCH_DEMO_SEGMENT_DURATION_MS;
+    }
+
+    private void showPausedBatch(long durationMs, File previewFile) {
+        batchPausedReview = true;
+        batchReviewVisible = true;
+        long endMs = Math.min(currentBatchSourceStartMs + BATCH_DEMO_SEGMENT_DURATION_MS, durationMs);
+        if (endMs > currentBatchSourceStartMs) {
+            pausedBatchTail = new BatchSegment(previewFile, endMs - currentBatchSourceStartMs,
+                    currentBatchSourceStartMs, endMs, true,
+                    session.getActiveFrameRate(), pendingBatchThumbnail);
+            pausedBatchTail.trimStartMs = currentBatchTrimStartMs;
+            pendingBatchThumbnail = null;
+            batchSegments.add(pausedBatchTail);
+            addBatchThumbnail(pausedBatchTail.thumbnail, batchSegments.size() - 1, true);
+        }
+        for (BatchSegment segment : batchSegments) segment.file = previewFile;
+        for (int i = 0; i < batchStackLayout.getChildCount(); i++) {
+            View holder = batchStackLayout.getChildAt(i);
+            bindBatchThumbnail(holder, (Integer) holder.getTag());
+        }
+        videoEditedInfo = null;
+        selectedBatchSegment = -1;
+        showBatchPreview(batchSegments.size() - 1);
+    }
+
+    private void resumePausedBatch() {
+        if (!canResumeBatchRecording()) return;
+        AndroidUtilities.cancelRunOnUIThread(batchScrubPreviewRunnable);
+        pendingBatchScrubIndex = -1;
+        persistSelectedBatchTrim();
+        // Continue the unfinished last circle even if another one was inspected.
+        long retainedEndMs = pausedBatchTail == null ? currentBatchSourceStartMs
+                : pausedBatchTail.sourceStartMs + pausedBatchTail.trimEndMs;
+        if (retainedEndMs <= 0) return;
+        session.setTrimRange(0, retainedEndMs);
+        if (pausedBatchTail != null) {
+            int index = batchSegments.indexOf(pausedBatchTail);
+            currentBatchTrimStartMs = pausedBatchTail.trimStartMs;
+            if (index >= 0) {
+                View holder = findBatchThumbnail(index);
+                if (holder != null) {
+                    holder.animate().cancel();
+                    batchStackLayout.removeView(holder);
+                }
+                batchSegments.remove(index);
+            }
+            if (pausedBatchTail.thumbnail != null && !pausedBatchTail.thumbnail.isRecycled()) {
+                pausedBatchTail.thumbnail.recycle();
+            }
+            pausedBatchTail = null;
+        }
+        batchPausedReview = false;
+        batchReviewVisible = false;
+        selectedBatchSegment = -1;
+        videoEditedInfo = null;
+        for (BatchSegment segment : batchSegments) segment.file = null;
+        updateBatchSelectionVisual(-1, true);
+        if (batchSegments.isEmpty()) batchStackLayout.setVisibility(GONE);
+        else updateBatchStackCenter(true);
+        session.setMaximumDurationMs(getBatchMaximumDurationMs() + BATCH_SESSION_FINISH_MARGIN_MS);
+        resumeNotificationPending = true;
+        stopNotificationSent = false;
+        session.resumeRecording();
     }
 
     private void postRecordStopped(int reason) {
@@ -1191,7 +1363,7 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
         pendingBatchSend = options;
         progressView.getPaint().setAlpha(0);
         progressView.invalidate();
-        long finalStartMs = batchSegments.size() * BATCH_DEMO_SEGMENT_DURATION_MS;
+        long finalStartMs = currentBatchSourceStartMs;
         if (duration - finalStartMs >= MINIMUM_DURATION_MS) {
             updateBatchSelectionVisual(batchSegments.size(), true);
             pendingBatchHolder = addBatchThumbnail(
@@ -1221,10 +1393,10 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
 
         Bitmap thumbnail = pendingBatchThumbnail;
         pendingBatchThumbnail = null;
-        long finalStartMs = batchSegments.size() * BATCH_DEMO_SEGMENT_DURATION_MS;
-        long finalEndMs = Math.min(BATCH_MAXIMUM_DURATION_MS, result.getDurationMs());
+        long finalStartMs = currentBatchSourceStartMs;
+        long finalEndMs = Math.min(getBatchMaximumDurationMs(), result.getDurationMs());
         long finalDurationMs = Math.max(0L, finalEndMs - finalStartMs);
-        if (finalDurationMs >= MINIMUM_DURATION_MS) {
+        if (!batchPausedReview && finalDurationMs >= MINIMUM_DURATION_MS) {
             BatchSegment segment = new BatchSegment(
                     result.getFile(),
                     finalDurationMs,
@@ -1235,6 +1407,7 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
                     thumbnail
             );
             batchSegments.add(segment);
+            segment.trimStartMs = currentBatchTrimStartMs;
             int segmentIndex = batchSegments.size() - 1;
             if (pendingBatchHolder != null) {
                 bindBatchThumbnail(pendingBatchHolder, segmentIndex);
@@ -1269,6 +1442,8 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
             session = null;
         }
         stateInfo = null;
+        batchPausedReview = false;
+        pausedBatchTail = null;
         videoEditedInfo = null;
         progressView.setProgress(0f);
 
@@ -1452,8 +1627,25 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
     }
 
     private void showBatchPreview(int index) {
-        if (isBatchRecordingInProgress()) return;
+        if (stateInfo != null && stateInfo.getState() != RoundVideoSession.State.PREVIEWING) return;
         if (index < 0 || index >= batchSegments.size()) return;
+        if (batchPausedReview) {
+            persistSelectedBatchTrim();
+            selectedBatchSegment = index;
+            BatchSegment segment = batchSegments.get(index);
+            updateBatchSelectionVisual(index, true);
+            videoEditedInfo = createBatchVideoEditedInfo(segment, false);
+            session.setTrimRange(segment.sourceStartMs + segment.trimStartMs,
+                    segment.sourceStartMs + segment.trimEndMs);
+            session.seekPreview(segment.sourceStartMs + segment.trimStartMs);
+            session.playPreview();
+            NotificationCenter.getInstance(currentAccount).postNotificationName(
+                    NotificationCenter.audioDidSent, recordingGuid, videoEditedInfo,
+                    segment.file.getAbsolutePath(), new ArrayList<>(), segment.sourceStartMs);
+            dispatchTrimRange(segment.trimStartMs / (float) segment.durationMs,
+                    segment.trimEndMs / (float) segment.durationMs);
+            return;
+        }
         if (batchSending && batchVideoPlayer != null) {
             // Sending advances through ranges of the same continuous recording.
             // Reopening the editor here restarts its UI animation and decoder on
@@ -1528,7 +1720,8 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
                 recordingGuid,
                 videoEditedInfo,
                 segment.file.getAbsolutePath(),
-                new ArrayList<>()
+                new ArrayList<>(),
+                segment.sourceStartMs
         );
         float duration = Math.max(1L, segment.durationMs);
         dispatchTrimRange(
@@ -1950,6 +2143,10 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
         batchStackLayout.setVisibility(GONE);
         pendingBatchHolder = null;
         batchReviewVisible = false;
+        batchPausedReview = false;
+        pausedBatchTail = null;
+        currentBatchSourceStartMs = 0L;
+        currentBatchTrimStartMs = 0L;
         batchSending = false;
         batchStackCenterFrozen = false;
         batchStackTouchIndex = -1;
@@ -2032,6 +2229,41 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
         return info;
     }
 
+    @Override
+    public void flipCamera() {
+        if (isPaused() || cameraFlipInProgress) return;
+        pendingGestureCameraFlip = true;
+        applyPendingGestureCameraFlip();
+    }
+
+    private boolean pendingGestureCameraFlip;
+
+    private void applyPendingGestureCameraFlip() {
+        maybeAnimateInitialCameraFlip();
+        if (!pendingGestureCameraFlip || session == null || stateInfo == null || capabilities == null
+                || !stateInfo.canControlCamera() || isPaused() || cameraFlipInProgress) return;
+        pendingGestureCameraFlip = false;
+        switchCamera();
+    }
+
+    private void maybeAnimateInitialCameraFlip() {
+        if (!initialCameraFlipPending || !cameraOpenAnimationFinished || !opened
+                || session == null || stateInfo == null || capabilities == null
+                || stateInfo.getState() != RoundVideoSession.State.RECORDING
+                || cameraFlipInProgress) return;
+        initialCameraFlipPending = false;
+        switchCameraDrawable.setCurrentFrame(0);
+        switchCameraDrawable.start();
+        startCameraFlipAnimation(capabilities.getActiveFacing(), true);
+    }
+
+    private boolean flipCameraOnNextStart;
+
+    @Override
+    public void flipCameraOnNextStart() {
+        flipCameraOnNextStart = !flipCameraOnNextStart;
+    }
+
     private void switchCamera() {
         if (session == null || stateInfo == null || capabilities == null
                 || !stateInfo.canControlCamera() || cameraFlipInProgress) {
@@ -2041,13 +2273,9 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
                 capabilities.getRequestedFacing() == RoundVideoSession.CameraFacing.FRONT
                         ? RoundVideoSession.CameraFacing.BACK
                         : RoundVideoSession.CameraFacing.FRONT;
-        boolean overrideBefore = rearCameraStartOverride;
-        rearCameraStartOverride = false;
         if (session.setCameraFacing(facing)) {
             switchCameraDrawable.setCurrentFrame(0);
             switchCameraDrawable.start();
-        } else {
-            rearCameraStartOverride = overrideBefore;
         }
     }
 
@@ -2221,14 +2449,14 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
 
     private void showInitialPlaceholder() {
         if (drawInitialPlaceholder) return;
-        if (lastBitmap == null && !rearCameraStartOverride) {
+        if (lastBitmap == null) {
             try {
                 File file = new File(ApplicationLoader.getFilesDirFixed(), "icthumb.jpg");
                 lastBitmap = BitmapFactory.decodeFile(file.getAbsolutePath());
             } catch (Throwable ignore) {
             }
         }
-        if (lastBitmap != null && !rearCameraStartOverride) {
+        if (lastBitmap != null && !flipCameraOnNextStart) {
             textureOverlayView.setImageBitmap(lastBitmap);
         } else {
             textureOverlayView.setImageResource(R.drawable.icplaceholder);
@@ -2264,6 +2492,12 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
     private void startCameraFlipAnimation(
             @NonNull RoundVideoSession.CameraFacing facing
     ) {
+        startCameraFlipAnimation(facing, false);
+    }
+
+    private void startCameraFlipAnimation(
+            RoundVideoSession.CameraFacing facing, boolean initialCamera
+    ) {
         cameraFlipGeneration++;
         if (cameraFlipAnimator != null) {
             cameraFlipAnimator.removeAllListeners();
@@ -2271,11 +2505,11 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
             cameraFlipAnimator = null;
         }
         cameraFlipInProgress = true;
-        cameraFlipSessionReady = false;
-        cameraFlipFirstFrameReady = false;
+        cameraFlipSessionReady = initialCamera;
+        cameraFlipFirstFrameReady = initialCamera;
         cameraFlipAnimationCompleted = false;
         cameraFlipStartedRealtimeMs = SystemClock.elapsedRealtime();
-        showCameraSwitchPlaceholder();
+        if (!initialCamera) showCameraSwitchPlaceholder();
         previewContainer.animate().cancel();
         previewContainer.setRotationY(0f);
         previewContainer.setCameraDistance(previewContainer.getMeasuredHeight() * 8f);

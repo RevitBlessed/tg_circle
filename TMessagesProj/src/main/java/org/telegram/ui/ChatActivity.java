@@ -2481,16 +2481,33 @@ public class ChatActivity extends BaseFragment implements
         }
 
         @Override
-        public boolean supportsRearCameraStart() {
-            return true;
+        public void flipRecordingCamera() {
+            if (instantCameraView != null) {
+                instantCameraView.flipCamera();
+            }
+        }
+
+        private boolean flipCameraOnNextRecording;
+
+        @Override
+        public void prepareRecordingCameraFlip(boolean flip) {
+            flipCameraOnNextRecording = flip;
         }
 
         @Override
-        public void prepareRoundVideoCamera(boolean rearCamera) {
-            checkInstantCameraView();
-            if (instantCameraView != null) {
-                instantCameraView.setStartWithRearCamera(rearCamera);
-            }
+        public boolean isMultiSegmentRoundVideoEnabled() {
+            return ChatActivity.this.isMultiSegmentRoundVideoEnabled();
+        }
+
+        @Override
+        public boolean deleteSelectedRoundVideoSegment() {
+            return instantCameraView != null
+                    && instantCameraView.deleteSelectedBatchSegment();
+        }
+
+        @Override
+        public boolean canResumeRoundVideoBatch() {
+            return instantCameraView != null && instantCameraView.canResumeBatchRecording();
         }
 
         @Override
@@ -2498,12 +2515,18 @@ public class ChatActivity extends BaseFragment implements
             checkInstantCameraView();
             if (instantCameraView != null) {
                 if (state == 0) {
+                    if (flipCameraOnNextRecording) {
+                        instantCameraView.flipCameraOnNextStart();
+                        flipCameraOnNextRecording = false;
+                    }
                     instantCameraView.showCamera(false);
                     chatListView.stopScroll();
                     chatAdapter.updateRowsSafe();
                 } else if (state == 1 || state == 3 || state == 4) {
+                    flipCameraOnNextRecording = false;
                     instantCameraView.send(state, notify, scheduleDate, 0, ttl, effectId, stars);
                 } else if (state == 2 || state == 5) {
+                    flipCameraOnNextRecording = false;
                     instantCameraView.cancel(state == 2);
                 }
             }

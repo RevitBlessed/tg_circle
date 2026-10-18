@@ -1,49 +1,78 @@
 # Round Video UX Upgrades
 
-Конкурсная ветка объединяет три независимых улучшения видеосообщений Telegram
-Android на базе `f32ffeec763f0bdbf4bec25b52d654f77bff733d` (13.0.2 / 7175).
+## Submission baseline
 
-## 1. Разворот камеры одним жестом
+- Upstream: [DrKLO/Telegram](https://github.com/DrKLO/Telegram).
+- Exact base: [`f32ffeec763f0bdbf4bec25b52d654f77bff733d`](https://github.com/DrKLO/Telegram/commit/f32ffeec763f0bdbf4bec25b52d654f77bff733d), Android 13.0.2 / 7175.
+- Fork: [RevitBlessed/Telegram](https://github.com/RevitBlessed/Telegram).
+- Branch: `contest/round-video-upgrades`; release: `round-video-v1.0`.
 
-- обычный свайп вверх блокирует запись;
-- диагональный свайп влево-вверх сразу выбирает другую камеру и блокирует запись;
-- быстрый жест обрабатывается ещё до запуска камеры, поэтому видео начинается с
-  выбранного объектива;
-- первые нестабильные кадры выбранного сенсора не попадают в файл;
-- отдельный пузырёк и анимация показывают выполненный разворот камеры.
+The submission commit directly descends from the upstream base and contains the final implementation, not intermediate experiments. The older `RevitBlessed/tg_circle` repository is retained for development history.
 
-## 2. До пяти кружков за одну запись
+## 1. One-finger camera flip and recording lock
 
-- до пяти последовательных фрагментов по восемь секунд;
-- одна непрерывная сессия камеры и кодировщика;
-- центрированный стек миниатюр, выбор тапом или движением пальца;
-- предпросмотр и обрезка фрагментов;
-- последовательная отправка с сохранением порядка и анимацией стека.
+- Left: existing cancellation gesture.
+- Up: lock recording without flipping.
+- Diagonally up-left: flip the camera and lock together.
 
-Текущий путь отправки нескольких фрагментов является демонстрационным. Для
-продуктовой интеграции его следует подключить к серверной очереди Telegram и
-экспорту временных диапазонов исходной записи.
+The flip bubble accompanies the lock bubble with synchronized progress for the diagonal gesture. A quick gesture selects the camera before recording starts; UI flip feedback is retained. A later diagonal gesture can switch an already running recording. New sessions start with the front camera; continuations within the same session retain the camera.
 
-В debug-сборке деморежим доступен прямо на экране входа через кнопку
-«Открыть локальный чат», поэтому функцию можно проверить без тестового аккаунта.
+Gesture handling lives in `ChatActivityEnterView`. The recorder bridges camera selection into the Camera2 session; controller/GL changes suppress initial unstable frames during initialization and switching.
 
-## 3. Вибротаймер окончания записи
+## 2. Up to five round videos in one session
 
-- короткие сигналы за 10, 5, 4, 3, 2 и 1 секунду до минутного лимита;
-- усиленный сигнал при штатной автоматической остановке;
-- ручная остановка и отмена не вызывают финальный сигнал;
-- расчёт использует монотонные часы и не зависит от изменения системного времени;
-- системные настройки тактильного отклика соблюдаются.
+- Each circle keeps the normal **60-second** limit, not the old 8-second demo setting.
+- A continuous camera/encoder session supplies separate message ranges, rather than five simultaneous cameras or players.
+- A centered thumbnail stack supports tap and finger-scrub selection, brightness/overlap highlighting and transparent spacing.
+- Pause adds the unfinished circle to review; previous circles remain selectable.
+- Resume continues the unfinished last circle even after viewing another one. Resume availability is based on session state, not the total file duration.
+- Trash deletes only the selected circle when several remain; the last remaining circle uses normal discard behavior.
+- Preview and timeline use per-item trim ranges and offsets into the continuous file.
+- Sending preserves order and passes ranges through Telegram's existing media sending/conversion path in authenticated chats.
 
-Расчёт порогов отделён от Android API в `RoundVideoRecordingCountdown`; его
-регрессионные JVM-проверки находятся в
-`Tools/countdown/RoundVideoRecordingCountdownTest.java`.
+`InstantCameraView2` owns batch state, selection, ranges and send sequencing. `RoundVideoSession` owns recording, paused preview and resume. Chat delegates connect the controls and message sending.
 
-## Сборка
+One continuous source does not mean zero-cost export: outgoing clips still require media processing. Long recordings can increase disk use and export time on slower phones. Low-storage, thermal and background behavior require wider physical-device testing.
 
-```powershell
-.\gradlew.bat :TMessagesProj_App:assembleAfatDebug
+## 3. Countdown haptics
+
+Short feedback occurs at 10, 5, 4, 3, 2 and 1 seconds remaining, with stronger feedback at the automatic boundary. Manual stop/cancel does not request the automatic-limit signal. Thresholds are one-shot; delayed callbacks do not replay missed ticks in a burst.
+
+`RoundVideoRecordingCountdown` is Android-independent. `RoundVideoRecordingFeedback` handles platform feedback and system settings, including an older-device fallback for the stronger effect. Hardware and OS settings determine actual vibration availability/intensity.
+
+The initial countdown feature was supplied by a collaborating developer and integrated with the session flow. No unverified author identity is assigned here; upstream license notices remain intact.
+
+## Code map
+
+Java paths below are relative to `TMessagesProj/src/main/java/org/telegram/`.
+
+| Area | Files |
+| --- | --- |
+| Gesture, timer and controls | `ui/Components/ChatActivityEnterView.java` |
+| Stack, preview, delete and send | `ui/Components/InstantCameraView2.java` |
+| Recorder contract / legacy gesture support | `ui/Components/InstantCameraViewBase.java`, `InstantCameraView.java` |
+| Session and initial/switch frames | `utils/camera/roundvideo/RoundVideoSession.java`, `RoundVideoCameraController.java`, `RoundVideoGlProcessor.java` |
+| Chat integration and transitions | `ui/ChatActivity.java` |
+| Segment timeline | `ui/Components/VideoTimelineView.java` |
+| Haptics | `ui/Components/RoundVideoRecordingCountdown.java`, `RoundVideoRecordingFeedback.java` |
+| Debug-only local-chat entry | `ui/LoginActivity.java` |
+
+## Integration
+
+```sh
+git fetch https://github.com/RevitBlessed/Telegram.git contest/round-video-upgrades
+git diff --stat f32ffeec763f0bdbf4bec25b52d654f77bff733d FETCH_HEAD
+git log --oneline f32ffeec763f0bdbf4bec25b52d654f77bff733d..FETCH_HEAD
 ```
 
-APK создаётся в
-`TMessagesProj_App/build/outputs/apk/afat/debug/app.apk`.
+The single submission commit can be cherry-picked onto the pinned base. On a newer revision, review/resolve recorder and chat conflicts before building. Do not copy only the gesture or stack UI: session, timeline and delegate changes are also required.
+
+`ChatActivity.isMultiSegmentRoundVideoEnabled()` enables the feature; its recorder uses `InstantCameraView2`. There are no new third-party runtime dependencies or changes to protocol, native source, submodule pointers, app credentials or signing keys.
+
+### Retained local demo
+
+To preserve the accepted APK, debug builds retain the Russian-language "Открыть локальный чат" entry on the phone-number login page. It creates local messages and is **not** proof of network delivery. Some custom transitions are local-demo-specific. Use an authenticated account and a receiving client to check actual delivery.
+
+An upstream maintainer may omit this debug entry/local-demo support during integration; the real multi-circle feature is not gated on it. It is documented rather than silently removed from the accepted implementation.
+
+See [build instructions](docs/round-video/BUILD.md) and [validation](docs/round-video/VALIDATION.md). Contest eligibility and submission format must be checked against the specific organizer announcement.

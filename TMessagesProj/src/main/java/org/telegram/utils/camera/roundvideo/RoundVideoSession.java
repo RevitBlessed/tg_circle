@@ -219,6 +219,7 @@ public final class RoundVideoSession {
         private int videoBitrate;
         private long maximumDurationMs = DEFAULT_MAXIMUM_DURATION_MS;
         private boolean compositionEnabled = true;
+        private boolean warmCameraPreloadEnabled = true;
         private Listener listener;
         private OutputListener outputListener;
         private ScreenFlashController screenFlashController;
@@ -268,6 +269,16 @@ public final class RoundVideoSession {
         /** Enables the circular blur, dimming and Telegram overlays. */
         public @NonNull Builder setCompositionEnabled(boolean enabled) {
             compositionEnabled = enabled;
+            return this;
+        }
+
+        /**
+         * Controls whether the opposite camera is opened alongside the initial camera.
+         * Disabling this is useful when the initial facing was selected by the same gesture that
+         * starts recording: only the selected sensor can then contribute startup frames.
+         */
+        public @NonNull Builder setWarmCameraPreloadEnabled(boolean enabled) {
+            warmCameraPreloadEnabled = enabled;
             return this;
         }
 
@@ -517,7 +528,7 @@ public final class RoundVideoSession {
     private final CameraResolution requestedCameraResolution;
     private final FrameRate requestedFrameRate;
     private final boolean compositionEnabled;
-    private final long maximumDurationMs;
+    private long maximumDurationMs;
 
     private State state = State.IDLE;
     private CameraFacing requestedFacing;
@@ -608,6 +619,7 @@ public final class RoundVideoSession {
                 requestedCameraResolution,
                 requestedFrameRate,
                 compositionEnabled,
+                builder.warmCameraPreloadEnabled,
                 diagnostics,
                 cameraCallback
         );
@@ -658,6 +670,15 @@ public final class RoundVideoSession {
         setState(State.RESUMING);
         rebuildForResume();
         return true;
+    }
+
+    /** Adjusts the remaining batch capacity after deleting a paused circle. */
+    @MainThread
+    public void setMaximumDurationMs(long durationMs) {
+        requireMainThread();
+        if (state != State.PREVIEWING || durationMs <= recordedDurationMs) return;
+        maximumDurationMs = durationMs;
+        notifyState();
     }
 
     /** Updates the selected recorded-video range used by preview, resume and finish. */
