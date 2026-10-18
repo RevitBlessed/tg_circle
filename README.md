@@ -8,9 +8,9 @@ An unofficial submission fork of [DrKLO/Telegram](https://github.com/DrKLO/Teleg
 - [Implementation and integration guide](ROUND_VIDEO_UPGRADES.md)
 - [Build instructions and APK provenance](docs/round-video/BUILD.md)
 - [Validation and reviewer checklist](docs/round-video/VALIDATION.md)
-- [Latest APK: edited-video send fix](https://github.com/RevitBlessed/Telegram/releases/tag/round-video-v1.0.1)
+- [Latest APK: independent edited-circle export](https://github.com/RevitBlessed/Telegram/releases/tag/round-video-v1.0.2)
 
-The release includes pause/resume and selected-item deletion fixes, plus a fix for edited circles incorrectly reusing the same sent video. It is integrated into the Android app, not a standalone animation mockup. See the validation notes for testing scope; no Telegram certification is claimed.
+The release includes pause/resume and selected-item deletion fixes. Before sending, every edited circle is now materialized as an independent MP4 with duration read back from that file, preventing multiple messages from sharing the continuous recording or displaying a trim duration that differs from playback. It is integrated into the Android app, not a standalone animation mockup. See the validation notes for testing scope; no Telegram certification is claimed.
 
 ## Upstream Telegram messenger for Android
 

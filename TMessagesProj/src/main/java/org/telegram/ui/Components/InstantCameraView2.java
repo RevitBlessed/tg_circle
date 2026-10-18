@@ -54,6 +54,7 @@ import org.telegram.ui.Components.blur3.drawable.BlurredBackgroundDrawable;
 import org.telegram.ui.Components.blur3.drawable.color.BlurredBackgroundColorProvider;
 import org.telegram.ui.Components.voip.CellFlickerDrawable;
 import org.telegram.ui.Stories.recorder.FlashViews;
+import org.telegram.utils.camera.roundvideo.RoundVideoSegmentExporter;
 import org.telegram.utils.camera.roundvideo.RoundVideoSession;
 
 import java.io.File;
@@ -1851,6 +1852,28 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
         return info;
     }
 
+    private VideoEditedInfo createExportedBatchVideoEditedInfo(
+            BatchSegment segment,
+            RoundVideoSegmentExporter.Result exported
+    ) {
+        VideoEditedInfo info = new VideoEditedInfo();
+        info.startTime = -1L;
+        info.endTime = -1L;
+        info.estimatedDuration = exported.getDurationMs();
+        info.estimatedSize = Math.max(1L, exported.getFile().length());
+        info.roundVideo = true;
+        info.framerate = segment.frameRate.getValue();
+        int outputSize = activeOutputResolution == null
+                ? RoundVideoSession.OutputResolution.P480.getSize()
+                : activeOutputResolution.getSize();
+        info.resultWidth = info.originalWidth = outputSize;
+        info.resultHeight = info.originalHeight = outputSize;
+        info.originalPath = exported.getFile().getAbsolutePath();
+        info.originalDuration = exported.getDurationMs() * 1000L;
+        info.muted = !segment.hasAudio;
+        return info;
+    }
+
     private long getSegmentDurationLimitMs() {
         return multiSegmentEnabled ? BATCH_DEMO_SEGMENT_DURATION_MS : 60_000L;
     }
@@ -1867,16 +1890,75 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
         updateBatchSelectionVisual(sendSelectionSlot, false);
         sent = true;
         ArrayList<BatchSegment> segments = new ArrayList<>(batchSegments);
+        int outputSize = activeOutputResolution == null
+                ? RoundVideoSession.OutputResolution.P480.getSize()
+                : activeOutputResolution.getSize();
+        Utilities.globalQueue.postRunnable(() -> {
+            ArrayList<RoundVideoSegmentExporter.Result> exported = new ArrayList<>(segments.size());
+            try {
+                for (int i = 0; i < segments.size(); i++) {
+                    BatchSegment segment = segments.get(i);
+                    RoundVideoSegmentRange range = RoundVideoSegmentRange.resolve(
+                            segment.sourceStartMs,
+                            segment.durationMs,
+                            segment.trimStartMs,
+                            segment.trimEndMs,
+                            MINIMUM_DURATION_MS
+                    );
+                    File outputDirectory = segment.file.getParentFile();
+                    if (outputDirectory == null) {
+                        throw new IllegalStateException("Round-video output directory is unavailable");
+                    }
+                    exported.add(RoundVideoSegmentExporter.export(
+                            segment.file,
+                            outputDirectory,
+                            outputSize,
+                            range.startTimeUs / 1000L,
+                            range.endTimeUs / 1000L,
+                            segment.hasAudio
+                    ));
+                }
+                AndroidUtilities.runOnUIThread(() -> sendExportedBatch(
+                        segments, exported, options, sendSelectionSlot));
+            } catch (Throwable error) {
+                for (int i = 0; i < exported.size(); i++) {
+                    try {
+                        exported.get(i).getFile().delete();
+                    } catch (Throwable ignore) {
+                    }
+                }
+                FileLog.e(error);
+                AndroidUtilities.runOnUIThread(() -> {
+                    batchSending = false;
+                    batchStackCenterFrozen = false;
+                    sent = false;
+                    BulletinFactory.of(InstantCameraView2.this, resourcesProvider)
+                            .createErrorBulletin(LocaleController.getString(R.string.ErrorOccurred))
+                            .show();
+                });
+            }
+        });
+    }
+
+    private void sendExportedBatch(
+            ArrayList<BatchSegment> segments,
+            ArrayList<RoundVideoSegmentExporter.Result> exported,
+            SendOptions options,
+            int sendSelectionSlot
+    ) {
+        if (!batchSending || segments.size() != exported.size()) return;
+        int finalSegmentIndex = segments.size() - 1;
         ArrayList<MediaController.PhotoEntry> entries = new ArrayList<>(segments.size());
         ArrayList<VideoEditedInfo> editedInfos = new ArrayList<>(segments.size());
         for (int i = 0; i < segments.size(); i++) {
             BatchSegment segment = segments.get(i);
-            VideoEditedInfo info = createBatchVideoEditedInfo(segment, true);
+            RoundVideoSegmentExporter.Result exportedSegment = exported.get(i);
+            VideoEditedInfo info = createExportedBatchVideoEditedInfo(segment, exportedSegment);
             MediaController.PhotoEntry entry = new MediaController.PhotoEntry(
                     0,
                     0,
                     0,
-                    segment.file.getAbsolutePath(),
+                    exportedSegment.getFile().getAbsolutePath(),
                     0,
                     true,
                     0,
@@ -1887,7 +1969,6 @@ public final class InstantCameraView2 extends InstantCameraViewBase {
             entry.effectId = options.effectId;
             entries.add(entry);
             editedInfos.add(info);
-
         }
 
         if (segments.size() == 1) {

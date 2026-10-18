@@ -35,7 +35,13 @@ Inherited Gradle settings allow an 8 GB heap. On low-memory machines, close emul
 
 ## Latest APK
 
-[v1.0.1 release](https://github.com/RevitBlessed/Telegram/releases/tag/round-video-v1.0.1) fixes edited batch circles reusing an earlier sent document. Its release assets include the new APK and its SHA-256 file. Build variant and local native-library reuse are the same as described below; this is a new build, not the v1.0 binary.
+[v1.0.2 release](https://github.com/RevitBlessed/Telegram/releases/tag/round-video-v1.0.2) exports every final edited range to a separate MP4 before Telegram's send pipeline receives it. The duration sent in message metadata is read from the exported file. Its release assets include the new APK and its SHA-256 file. Build variant and local native-library reuse are the same as described below; this is a new build, not the v1.0 or v1.0.1 binary.
+
+SHA-256:
+
+```text
+1758d57d5271019b4042cbf172047e8c52d1ff8968d3cf4fe670c6762807947c
+```
 
 ## Historical v1.0 APK provenance
 

@@ -1,10 +1,10 @@
 # Verification and reviewer checklist
 
-## v1.0.1 fix verification
+## v1.0.2 fix verification
 
-The owner subsequently reported that two individually edited batch circles could arrive as identical videos. Source inspection found that `prepareSendingVideo` omitted round-video edits from the sent-file identity. The new regression test simulates a completed first upload followed by a cache lookup for the second edited range: it must not reuse that document. Identical retries still share their own identity; different trims, audio modes and source offsets do not.
+The v1.0.1 sent-file identity fix did not eliminate the physical-file aliasing reported on a device: every batch item still pointed at one continuous recording and depended on downstream time ranges. v1.0.2 resolves the ambiguity before sending. Each final range is remuxed serially into its own MP4, each message receives a unique path with no remaining trim range, and message duration is read back from the resulting MP4 rather than copied from editor state.
 
-The range/identity and countdown JVM tests pass locally. These tests exercise production calculation helpers; they do not substitute for end-to-end delivery on a real account. The new APK needs confirmation on the reported two-edited-video scenario. Earlier acceptance of v1.0 is not claimed as acceptance of this fix.
+The Android build and APK signature verification pass locally. The range/identity and countdown JVM tests continue to cover their production calculation helpers, but do not exercise Android media extraction. The v1.0.2 APK therefore still needs confirmation on the originally reported two-edited-video physical-device scenario; earlier acceptance is not claimed as acceptance of this fix.
 
 ## Evidence
 
@@ -12,7 +12,7 @@ The range/identity and countdown JVM tests pass locally. These tests exercise pr
 - `:TMessagesProj_App:assembleAfatDebug` succeeded using the local native-library reuse route described in [BUILD.md](BUILD.md).
 - APK signature verification and update installation on the emulator succeeded.
 - The Android-independent countdown regression test is included and exercised separately.
-- Initial publishing preserved the accepted Java implementation; v1.0.1 includes the documented send-cache/range fix.
+- v1.0.2 retains the send-cache/range identity fix and removes shared-file ranges from the final send inputs entirely.
 
 This is not exhaustive QA. Clean full-native builds, all variants, low-end performance, physical haptics and all network delivery cases are not certified here. The last automated emulator pass stopped at login, so authenticated recording was not exercised in that pass. The owner's subsequent acceptance is separate from automated testing.
 
